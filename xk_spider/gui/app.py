@@ -2529,14 +2529,33 @@ class MainWindow(QMainWindow):
                 current_version = "beta"
                 
                 if latest_version != current_version:
-                    reply = QMessageBox.question(
-                        self, "发现新版本",
-                        f"当前版本：{current_version}\n最新版本：{latest_version}\n\n是否前往下载？",
-                        QMessageBox.Yes | QMessageBox.No
-                    )
-                    if reply == QMessageBox.Yes:
-                        import webbrowser
-                        webbrowser.open("https://github.com/YHalo-wyh/YNU-xk_spider/releases")
+                    # 查找安装包下载链接
+                    download_url = None
+                    assets = data.get("assets", [])
+                    for asset in assets:
+                        name = asset.get("name", "")
+                        if name.endswith(".exe") and "Setup" in name:
+                            download_url = asset.get("browser_download_url")
+                            break
+                    
+                    if download_url:
+                        reply = QMessageBox.question(
+                            self, "发现新版本",
+                            f"当前版本：{current_version}\n最新版本：{latest_version}\n\n是否自动下载并安装？",
+                            QMessageBox.Yes | QMessageBox.No
+                        )
+                        if reply == QMessageBox.Yes:
+                            self._download_and_install(download_url, latest_version)
+                    else:
+                        # 没有找到安装包，打开浏览器
+                        reply = QMessageBox.question(
+                            self, "发现新版本",
+                            f"当前版本：{current_version}\n最新版本：{latest_version}\n\n是否前往下载？",
+                            QMessageBox.Yes | QMessageBox.No
+                        )
+                        if reply == QMessageBox.Yes:
+                            import webbrowser
+                            webbrowser.open("https://github.com/YHalo-wyh/YNU-xk_spider/releases")
                 else:
                     QMessageBox.information(self, "检查更新", f"当前已是最新版本 {current_version}")
             else:
@@ -2545,6 +2564,48 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "检查更新", f"检查更新失败：{str(e)}")
             self.statusBar().showMessage("检查更新失败", 3000)
+    
+    def _download_and_install(self, url, version):
+        """下载并安装更新"""
+        import requests
+        import tempfile
+        import subprocess
+        
+        try:
+            self.statusBar().showMessage(f"正在下载 {version}...")
+            
+            # 下载文件
+            response = requests.get(url, stream=True, timeout=300)
+            total_size = int(response.headers.get('content-length', 0))
+            
+            # 保存到临时目录
+            temp_dir = tempfile.gettempdir()
+            installer_path = os.path.join(temp_dir, f"YNU_Course_Helper_{version}_Setup.exe")
+            
+            downloaded = 0
+            with open(installer_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total_size > 0:
+                            percent = int(downloaded * 100 / total_size)
+                            self.statusBar().showMessage(f"下载中... {percent}%")
+            
+            self.statusBar().showMessage("下载完成，正在启动安装程序...")
+            
+            # 启动安装程序
+            subprocess.Popen([installer_path], shell=True)
+            
+            # 提示用户关闭当前程序
+            QMessageBox.information(
+                self, "更新",
+                "安装程序已启动，请关闭当前程序后完成安装。"
+            )
+            
+        except Exception as e:
+            QMessageBox.warning(self, "下载失败", f"下载更新失败：{str(e)}")
+            self.statusBar().showMessage("下载失败", 3000)
     
     def log(self, msg):
         # 限制日志最多500条，超过清空

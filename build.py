@@ -88,9 +88,6 @@ OutFile "YNU选课助手Pro_Setup.exe"
 InstallDir "$PROGRAMFILES\\YNU选课助手Pro"
 RequestExecutionLevel admin
 
-!define MUI_ICON "icon.ico"
-!define MUI_UNICON "icon.ico"
-
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
