@@ -33,6 +33,15 @@ try:
 except ImportError:
     OCR_AVAILABLE = False
 
+
+def get_resource_path(relative_path):
+    """获取资源文件的绝对路径，支持打包后的exe"""
+    if hasattr(sys, '_MEIPASS'):
+        # PyInstaller 打包后的临时目录
+        return os.path.join(sys._MEIPASS, relative_path)
+    return os.path.join(os.path.abspath("."), relative_path)
+
+
 # 课程类型映射
 COURSE_TYPES = {
     '推荐课程': 'TJKC',
@@ -188,9 +197,19 @@ class LoginWorker(QThread):
         chrome_options.add_experimental_option('excludeSwitches', ['enable-automation'])
         chrome_options.add_experimental_option('useAutomationExtension', False)
         
-        if self.driver_path:
-            service = Service(executable_path=self.driver_path)
-            self.driver = webdriver.Chrome(service=service, options=chrome_options)
+        # 获取正确的 chromedriver 路径（支持打包后的exe）
+        driver_path = self.driver_path
+        if driver_path:
+            # 如果是相对路径，转换为绝对路径
+            if not os.path.isabs(driver_path):
+                driver_path = get_resource_path(driver_path)
+            
+            if os.path.exists(driver_path):
+                service = Service(executable_path=driver_path)
+                self.driver = webdriver.Chrome(service=service, options=chrome_options)
+            else:
+                # 路径不存在，尝试让 selenium 自动查找
+                self.driver = webdriver.Chrome(options=chrome_options)
         else:
             self.driver = webdriver.Chrome(options=chrome_options)
         
