@@ -22,6 +22,13 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.common.exceptions import TimeoutException
 
+# 自动管理 ChromeDriver
+try:
+    from webdriver_manager.chrome import ChromeDriverManager
+    WEBDRIVER_MANAGER_AVAILABLE = True
+except ImportError:
+    WEBDRIVER_MANAGER_AVAILABLE = False
+
 # Pillow 兼容补丁
 from PIL import Image
 if not hasattr(Image, 'ANTIALIAS'):
@@ -191,34 +198,44 @@ class LoginWorker(QThread):
         chrome_options = Options()
         chrome_options.add_argument('--disable-gpu')
         chrome_options.add_argument('--no-sandbox')
-        chrome_options.add_argument('--window-size=1920,1080')  # 设置窗口大小，确保验证码能正确截取
+        chrome_options.add_argument('--window-size=1920,1080')
         chrome_options.add_argument('--disable-dev-shm-usage')
         chrome_options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
         chrome_options.add_experimental_option('excludeSwitches', ['enable-automation'])
         chrome_options.add_experimental_option('useAutomationExtension', False)
         
-        # 获取正确的 chromedriver 路径（支持打包后的exe）
+        # 优先使用 webdriver-manager 自动下载匹配的 ChromeDriver
+        if WEBDRIVER_MANAGER_AVAILABLE:
+            try:
+                service = Service(ChromeDriverManager().install())
+                self.driver = webdriver.Chrome(service=service, options=chrome_options)
+            except Exception as e:
+                print(f"[WARN] webdriver-manager 失败: {e}, 尝试使用本地驱动")
+                self._init_driver_fallback(chrome_options)
+        else:
+            self._init_driver_fallback(chrome_options)
+        
+        # 设置窗口大小
+        self.driver.set_window_size(1920, 1080)
+        
+        self.driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
+            'source': 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'
+        })
+    
+    def _init_driver_fallback(self, chrome_options):
+        """备用方案：使用本地 ChromeDriver"""
         driver_path = self.driver_path
         if driver_path:
-            # 如果是相对路径，转换为绝对路径
             if not os.path.isabs(driver_path):
                 driver_path = get_resource_path(driver_path)
             
             if os.path.exists(driver_path):
                 service = Service(executable_path=driver_path)
                 self.driver = webdriver.Chrome(service=service, options=chrome_options)
-            else:
-                # 路径不存在，尝试让 selenium 自动查找
-                self.driver = webdriver.Chrome(options=chrome_options)
-        else:
-            self.driver = webdriver.Chrome(options=chrome_options)
+                return
         
-        # 设置窗口大小（双重保险）
-        self.driver.set_window_size(1920, 1080)
-        
-        self.driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
-            'source': 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'
-        })
+        # 最后尝试让 selenium 自动查找
+        self.driver = webdriver.Chrome(options=chrome_options)
     
     def _recognize_captcha(self):
         """识别验证码"""
@@ -2531,7 +2548,7 @@ class MainWindow(QMainWindow):
         about_text = """
 <h2>YNU选课助手 Pro</h2>
 <p>版本：测试版 (Beta) - 2026.01</p>
-<p>适配 Chrome：132.x</p>
+<p>适配 Chrome：自动适配（首次运行自动下载驱动）</p>
 <p>作者：YHalo-wyh</p>
 <p>原项目：<a href="https://github.com/starwingChen/YNU-xk_spider">starwingChen/YNU-xk_spider</a></p>
 <p>GitHub：<a href="https://github.com/YHalo-wyh/YNU-xk_spider">https://github.com/YHalo-wyh/YNU-xk_spider</a></p>

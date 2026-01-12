@@ -69,7 +69,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Chrome 版本要求：132.0.6834.160（需下载对应版本的 ChromeDriver）
+Chrome 版本要求：自动适配（程序会自动下载匹配的 ChromeDriver）
 
 ## ⚠️ 免责声明
 
@@ -90,7 +90,7 @@ Chrome 版本要求：132.0.6834.160（需下载对应版本的 ChromeDriver）
 - 微信推送功能
 - 浏览器异常自动恢复
 - 自动检查更新
-- 适配 Chrome 132.0.6834.160
+- 自动适配 Chrome 版本
 
 ## 📄 License
 

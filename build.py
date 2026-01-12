@@ -48,9 +48,12 @@ def build_exe():
         # 收集所有依赖
         "--collect-all=ddddocr",
         "--collect-all=onnxruntime",
+        "--collect-all=webdriver_manager",
         # 隐藏导入
         "--hidden-import=PyQt5.sip",
         "--hidden-import=PIL._tkinter_finder",
+        "--hidden-import=webdriver_manager",
+        "--hidden-import=webdriver_manager.chrome",
     ]
     
     if os.path.exists("icon.ico"):
