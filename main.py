@@ -6,12 +6,13 @@ import sys
 import os
 import traceback
 
-# 将项目根目录添加到路径
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 高 DPI 适配 - 必须在导入 PyQt5 之前设置
+os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "1"
+os.environ["QT_SCALE_FACTOR_ROUNDING_POLICY"] = "PassThrough"
 
 from PyQt5.QtWidgets import QApplication, QMessageBox
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont
+from PyQt5.QtCore import Qt, QCoreApplication
+from PyQt5.QtGui import QFont, QGuiApplication
 
 from xk_spider.gui import MainWindow
 
@@ -35,17 +36,25 @@ def main():
     # 设置全局异常处理
     sys.excepthook = exception_hook
     
-    # 启用高DPI支持
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
-    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+    # 启用高DPI支持 - 必须在创建 QApplication 之前
+    QCoreApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QCoreApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+    
+    # 设置缩放因子舍入策略 (Qt 5.14+)
+    try:
+        QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
+            Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+        )
+    except AttributeError:
+        pass  # Qt 5.14 以下版本没有这个 API
     
     # 创建应用
     app = QApplication(sys.argv)
     app.setApplicationName('YNU选课助手')
     app.setApplicationVersion('beta')
     
-    # 设置默认字体
-    font = QFont('Microsoft YaHei', 10)
+    # 设置默认字体 - 不要手动调整大小，让 Qt 自动缩放
+    font = QFont('Microsoft YaHei', 9)
     app.setFont(font)
     
     # 创建主窗口

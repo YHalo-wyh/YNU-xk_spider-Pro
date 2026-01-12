@@ -124,8 +124,8 @@ Section "Uninstall"
 SectionEnd
 """
     
-    # 保存 NSIS 脚本
-    with open("installer.nsi", "w", encoding="utf-8") as f:
+    # 保存 NSIS 脚本 (使用 UTF-8 BOM 编码以支持中文)
+    with open("installer.nsi", "w", encoding="utf-8-sig") as f:
         f.write(nsis_script)
     
     # 检查是否安装了 NSIS

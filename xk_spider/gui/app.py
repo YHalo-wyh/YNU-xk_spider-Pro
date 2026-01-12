@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QLineEdit, QComboBox, QListWidget, QListWidgetItem,
     QTextEdit, QProgressBar, QMessageBox, QFrame, QGridLayout, QSizePolicy,
-    QGroupBox, QSpinBox, QScrollArea, QCheckBox
+    QGroupBox, QSpinBox, QScrollArea, QCheckBox, QSplitter
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize
 from PyQt5.QtGui import QFont
@@ -44,9 +44,38 @@ except ImportError:
 def get_resource_path(relative_path):
     """获取资源文件的绝对路径，支持打包后的exe"""
     if hasattr(sys, '_MEIPASS'):
-        # PyInstaller 打包后的临时目录
-        return os.path.join(sys._MEIPASS, relative_path)
+        # PyInstaller --onefile 模式：资源在临时目录
+        path = os.path.join(sys._MEIPASS, relative_path)
+        if os.path.exists(path):
+            return path
+    
+    # PyInstaller --onedir 模式：资源在 exe 同级目录
+    if getattr(sys, 'frozen', False):
+        base_path = os.path.dirname(sys.executable)
+        path = os.path.join(base_path, relative_path)
+        if os.path.exists(path):
+            return path
+    
+    # 开发环境：相对于当前工作目录
     return os.path.join(os.path.abspath("."), relative_path)
+
+
+def parse_int(value, default=0):
+    """解析整数，支持带单位的字符串如 '73人'"""
+    if value is None:
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        # 提取数字部分
+        import re
+        match = re.search(r'\d+', value)
+        if match:
+            return int(match.group())
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
 
 
 # 课程类型映射
@@ -77,12 +106,11 @@ class CourseCard(QFrame):
         
     def init_ui(self):
         self.setFrameStyle(QFrame.Box | QFrame.Raised)
-        self.setMinimumSize(280, 190)
-        self.setMaximumWidth(360)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         
         layout = QVBoxLayout(self)
-        layout.setSpacing(6)
-        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(5)
+        layout.setContentsMargins(12, 10, 12, 10)
         
         is_conflict = self.course_data.get('isConflict', False)
         volunteer_type = self.course_data.get('volunteerType', '')
@@ -109,8 +137,8 @@ class CourseCard(QFrame):
             layout.addWidget(time_label)
         
         # 容量进度条
-        first_vol = int(self.course_data.get('DYZY', 0) or 0)
-        capacity = int(self.course_data.get('KRL', 0) or 0)
+        first_vol = parse_int(self.course_data.get('DYZY', 0))
+        capacity = parse_int(self.course_data.get('KRL', 0))
         remain = capacity - first_vol
         
         # 容量文字
@@ -124,7 +152,6 @@ class CourseCard(QFrame):
         progress.setMaximum(capacity if capacity > 0 else 1)
         progress.setValue(first_vol)
         progress.setTextVisible(False)
-        progress.setFixedHeight(6)
         if remain > 0:
             progress.setStyleSheet("QProgressBar { background-color: #e8e8ed; border-radius: 3px; } QProgressBar::chunk { background-color: #34c759; border-radius: 3px; }")
         else:
@@ -135,7 +162,6 @@ class CourseCard(QFrame):
         
         # 加入待抢按钮
         grab_btn = QPushButton("🎯 加入待抢")
-        grab_btn.setFixedHeight(34)
         
         if is_conflict:
             grab_btn.setEnabled(False)
@@ -176,6 +202,7 @@ class LoginWorker(QThread):
     success = pyqtSignal(str, str, str, str, object)
     failed = pyqtSignal(str)
     status = pyqtSignal(str)
+    auto_download_driver = pyqtSignal()  # 自动下载 ChromeDriver 时发出
     
     LOGIN_URL = "https://xk.ynu.edu.cn/xsxkapp/sys/xsxkapp/*default/index.do"
     
@@ -194,48 +221,215 @@ class LoginWorker(QThread):
             except:
                 pass
     
+    def _get_local_driver_cache_path(self):
+        """获取本地驱动缓存目录"""
+        if getattr(sys, 'frozen', False):
+            # 打包后：exe 同级目录
+            base = os.path.dirname(sys.executable)
+        else:
+            # 开发环境：当前目录
+            base = os.getcwd()
+        
+        cache_dir = os.path.join(base, 'driver_cache')
+        if not os.path.exists(cache_dir):
+            os.makedirs(cache_dir)
+        return cache_dir
+    
+    def _find_cached_driver(self):
+        """查找缓存的 ChromeDriver"""
+        cache_dir = self._get_local_driver_cache_path()
+        driver_name = 'chromedriver.exe' if sys.platform == 'win32' else 'chromedriver'
+        driver_path = os.path.join(cache_dir, driver_name)
+        
+        if os.path.exists(driver_path):
+            return driver_path
+        return None
+    
+    def _save_driver_to_cache(self, source_path):
+        """将下载的驱动保存到本地缓存"""
+        try:
+            import shutil
+            cache_dir = self._get_local_driver_cache_path()
+            driver_name = 'chromedriver.exe' if sys.platform == 'win32' else 'chromedriver'
+            dest_path = os.path.join(cache_dir, driver_name)
+            
+            # 复制驱动文件
+            shutil.copy2(source_path, dest_path)
+            print(f"[INFO] 驱动已缓存到: {dest_path}")
+            return dest_path
+        except Exception as e:
+            print(f"[WARN] 缓存驱动失败: {e}")
+            return None
+    
     def _init_driver(self):
         chrome_options = Options()
         chrome_options.add_argument('--disable-gpu')
         chrome_options.add_argument('--no-sandbox')
-        chrome_options.add_argument('--window-size=1920,1080')
         chrome_options.add_argument('--disable-dev-shm-usage')
+        chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+        chrome_options.add_argument('--ignore-certificate-errors')
+        chrome_options.add_argument('--ignore-ssl-errors')
         chrome_options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-        chrome_options.add_experimental_option('excludeSwitches', ['enable-automation'])
+        chrome_options.add_experimental_option('excludeSwitches', ['enable-automation', 'enable-logging'])
         chrome_options.add_experimental_option('useAutomationExtension', False)
         
-        # 优先使用 webdriver-manager 自动下载匹配的 ChromeDriver
-        if WEBDRIVER_MANAGER_AVAILABLE:
+        errors = []
+        
+        # ========== 方案1: 使用本地缓存的 ChromeDriver ==========
+        cached_driver = self._find_cached_driver()
+        if cached_driver:
             try:
-                service = Service(ChromeDriverManager().install())
+                print(f"[INFO] 方案1: 使用缓存驱动 {cached_driver}")
+                self.status.emit("正在启动浏览器...")
+                service = Service(executable_path=cached_driver)
                 self.driver = webdriver.Chrome(service=service, options=chrome_options)
+                self._setup_driver()
+                print("[INFO] 缓存驱动启动成功！")
+                return
             except Exception as e:
-                print(f"[WARN] webdriver-manager 失败: {e}, 尝试使用本地驱动")
-                self._init_driver_fallback(chrome_options)
-        else:
-            self._init_driver_fallback(chrome_options)
+                err_msg = str(e)
+                print(f"[WARN] 缓存驱动失败（可能版本不匹配）: {err_msg[:80]}")
+                errors.append(f"缓存驱动: {err_msg[:60]}")
+                # 删除旧缓存，稍后重新下载
+                try:
+                    os.remove(cached_driver)
+                    print("[INFO] 已删除旧缓存驱动")
+                except:
+                    pass
         
-        # 设置窗口大小
-        self.driver.set_window_size(1920, 1080)
-        
-        self.driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
-            'source': 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'
-        })
-    
-    def _init_driver_fallback(self, chrome_options):
-        """备用方案：使用本地 ChromeDriver"""
+        # ========== 方案2: 使用打包的本地 ChromeDriver ==========
         driver_path = self.driver_path
         if driver_path:
-            if not os.path.isabs(driver_path):
-                driver_path = get_resource_path(driver_path)
+            possible_paths = []
+            if os.path.isabs(driver_path):
+                possible_paths.append(driver_path)
+            else:
+                if getattr(sys, 'frozen', False):
+                    possible_paths.append(os.path.join(os.path.dirname(sys.executable), driver_path))
+                possible_paths.append(get_resource_path(driver_path))
+                possible_paths.append(os.path.join(os.getcwd(), driver_path))
             
-            if os.path.exists(driver_path):
-                service = Service(executable_path=driver_path)
-                self.driver = webdriver.Chrome(service=service, options=chrome_options)
-                return
+            for path in possible_paths:
+                if os.path.exists(path):
+                    try:
+                        print(f"[INFO] 方案2: 尝试本地驱动 {path}")
+                        self.status.emit("正在启动浏览器...")
+                        service = Service(executable_path=path)
+                        self.driver = webdriver.Chrome(service=service, options=chrome_options)
+                        self._setup_driver()
+                        print("[INFO] 本地驱动成功！")
+                        return
+                    except Exception as e:
+                        err_msg = str(e)
+                        print(f"[WARN] 本地驱动失败: {err_msg[:80]}")
+                        errors.append(f"本地驱动: {err_msg[:60]}")
+                        break
         
-        # 最后尝试让 selenium 自动查找
-        self.driver = webdriver.Chrome(options=chrome_options)
+        # ========== 方案3: Selenium 自动下载并缓存 ==========
+        try:
+            print("[INFO] 方案3: Selenium 自动管理驱动...")
+            self.status.emit("首次运行，正在下载匹配的 ChromeDriver...")
+            self.auto_download_driver.emit()  # 通知显示下载提示
+            self.driver = webdriver.Chrome(options=chrome_options)
+            self._setup_driver()
+            print("[INFO] Selenium 自动管理成功！")
+            
+            # 尝试找到下载的驱动并缓存
+            self._try_cache_selenium_driver()
+            return
+        except Exception as e:
+            err_msg = str(e)
+            print(f"[WARN] 方案3失败: {err_msg[:80]}")
+            errors.append(f"Selenium自动管理: {err_msg[:60]}")
+        
+        # ========== 方案4: webdriver-manager 下载并缓存 ==========
+        if WEBDRIVER_MANAGER_AVAILABLE:
+            try:
+                print("[INFO] 方案4: webdriver-manager...")
+                self.status.emit("正在下载 ChromeDriver（首次下载后会缓存）...")
+                self.auto_download_driver.emit()
+                from webdriver_manager.chrome import ChromeDriverManager
+                downloaded_path = ChromeDriverManager().install()
+                
+                # 缓存到本地
+                self._save_driver_to_cache(downloaded_path)
+                
+                service = Service(downloaded_path)
+                self.driver = webdriver.Chrome(service=service, options=chrome_options)
+                self._setup_driver()
+                print("[INFO] webdriver-manager 成功！")
+                return
+            except Exception as e:
+                err_msg = str(e)
+                print(f"[WARN] 方案4失败: {err_msg[:80]}")
+                errors.append(f"webdriver-manager: {err_msg[:60]}")
+        
+        # ========== 所有方案都失败 ==========
+        error_detail = "\n".join(errors) if errors else "未知错误"
+        raise Exception(
+            f"无法启动浏览器驱动！\n\n"
+            f"可能的原因：\n"
+            f"1. 网络无法连接（首次需要下载驱动）\n"
+            f"2. Chrome 浏览器未安装\n"
+            f"3. ChromeDriver 版本与 Chrome 不匹配\n\n"
+            f"解决方案：\n"
+            f"1. 确保已安装 Chrome 浏览器\n"
+            f"2. 首次运行需要网络下载驱动\n"
+            f"3. 之后会使用本地缓存，无需网络\n\n"
+            f"错误详情：\n{error_detail}"
+        )
+    
+    def _try_cache_selenium_driver(self):
+        """尝试缓存 Selenium 下载的驱动"""
+        try:
+            # Selenium 4.10+ 驱动缓存位置
+            selenium_cache = os.path.join(os.path.expanduser('~'), '.cache', 'selenium')
+            if not os.path.exists(selenium_cache):
+                return
+            
+            # 查找 chromedriver
+            for root, dirs, files in os.walk(selenium_cache):
+                for f in files:
+                    if f.startswith('chromedriver') and (f.endswith('.exe') or '.' not in f):
+                        source = os.path.join(root, f)
+                        self._save_driver_to_cache(source)
+                        return
+        except Exception as e:
+            print(f"[WARN] 缓存 Selenium 驱动失败: {e}")
+    
+    def _setup_driver(self):
+        """设置 driver 属性，窗口放在屏幕右下角不遮挡主程序"""
+        try:
+            # 获取屏幕尺寸
+            screen_width = self.driver.execute_script("return screen.width;")
+            screen_height = self.driver.execute_script("return screen.height;")
+            
+            # 浏览器窗口大小（适中）
+            browser_width = min(1200, screen_width - 100)
+            browser_height = min(800, screen_height - 150)
+            
+            # 放在屏幕右下角（不遮挡左上角的主程序）
+            pos_x = screen_width - browser_width - 50
+            pos_y = screen_height - browser_height - 100
+            
+            # 确保不超出屏幕
+            pos_x = max(0, pos_x)
+            pos_y = max(0, pos_y)
+            
+            self.driver.set_window_size(browser_width, browser_height)
+            self.driver.set_window_position(pos_x, pos_y)
+        except:
+            # 如果获取屏幕尺寸失败，使用默认值
+            self.driver.set_window_size(1200, 800)
+            self.driver.set_window_position(100, 100)
+        
+        # 隐藏 webdriver 特征
+        try:
+            self.driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
+                'source': 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'
+            })
+        except:
+            pass
     
     def _recognize_captcha(self):
         """识别验证码"""
@@ -427,30 +621,83 @@ class LoginWorker(QThread):
                 try:
                     elapsed = time.time() - login_start_time
                     
-                    # 检测页面状态
-                    page_state = self.driver.execute_script("""
+                    # 检测页面状态（包括错误信息）
+                    page_info = self.driver.execute_script("""
+                        var result = {state: 'unknown', error: ''};
+                        
+                        // 检查登录错误信息
+                        var errorBtn = document.getElementById('errorMsg');
+                        if (errorBtn && errorBtn.style.display !== 'none') {
+                            var errorText = errorBtn.textContent || '';
+                            // 只有明确是密码/登录名错误才终止，验证码错误会自动重试
+                            if ((errorText.indexOf('密码') >= 0 || errorText.indexOf('登录名') >= 0) && errorText.indexOf('验证码') < 0) {
+                                result.state = 'password_error';
+                                result.error = errorText;
+                                return result;
+                            }
+                            // 验证码错误，继续在 login_page 状态处理
+                            if (errorText.indexOf('验证码') >= 0) {
+                                result.state = 'captcha_error';
+                                result.error = errorText;
+                                return result;
+                            }
+                        }
+                        
                         // 1. 检查是否已进入选课页面（有课程数据）
                         if (document.getElementById('aPublicCourse')) {
-                            return 'logged_in';
+                            result.state = 'logged_in';
+                            return result;
                         }
                         // 2. 检查开始选课按钮
                         var courseBtn = document.getElementById('courseBtn');
                         if (courseBtn && courseBtn.offsetWidth > 0) {
-                            return 'start_btn';
+                            result.state = 'start_btn';
+                            return result;
                         }
                         // 3. 检查轮次选择
                         if (document.querySelector('input[name="electiveBatchSelect"]')) {
-                            return 'batch_select';
+                            result.state = 'batch_select';
+                            return result;
                         }
                         // 4. 检查登录页面
                         if (document.getElementById('loginName')) {
-                            return 'login_page';
+                            result.state = 'login_page';
+                            return result;
                         }
-                        return 'unknown';
+                        // 5. 检查空白/异常页面（有"操作手册"、"选课模式"等文字但没有正常界面）
+                        var bodyText = document.body ? document.body.innerText : '';
+                        if (bodyText.indexOf('操作手册') >= 0 && bodyText.indexOf('选课模式') >= 0 && !document.getElementById('aPublicCourse') && !document.getElementById('loginName')) {
+                            result.state = 'blank_page';
+                            return result;
+                        }
+                        return result;
                     """)
+                    
+                    page_state = page_info.get('state', 'unknown') if isinstance(page_info, dict) else page_info
+                    error_text = page_info.get('error', '') if isinstance(page_info, dict) else ''
                     
                     print(f"[DEBUG] 登录监控 - 页面状态: {page_state} ({int(elapsed)}秒)")
                     self.status.emit(f"页面状态: {page_state} ({int(elapsed)}秒)")
+                    
+                    # 检测到空白/异常页面，直接刷新
+                    if page_state == 'blank_page':
+                        self.status.emit("检测到异常页面，刷新中...")
+                        print("[WARN] 检测到空白/异常页面，刷新...")
+                        self.driver.refresh()
+                        login_start_time = time.time()
+                        time.sleep(2)
+                        continue
+                    
+                    # 检测到密码错误，终止登录
+                    if page_state == 'password_error':
+                        self.failed.emit(f"登录失败：{error_text}\n\n请检查学号和密码是否正确！")
+                        if self.driver:
+                            try:
+                                self.driver.quit()
+                            except:
+                                pass
+                            self.driver = None
+                        return
                     
                     if page_state == 'logged_in':
                         # 已进入选课页面，获取token
@@ -470,6 +717,20 @@ class LoginWorker(QThread):
                         login_start_time = time.time()  # 重置计时
                         time.sleep(1)
                     
+                    elif page_state == 'captcha_error':
+                        # 验证码错误，刷新验证码并重新识别
+                        self.status.emit("验证码错误，重新识别...")
+                        print("[WARN] 验证码错误，刷新重新识别...")
+                        self.driver.execute_script("document.getElementById('vcodeImg').click();")
+                        time.sleep(0.8)
+                        captcha_code = self._recognize_captcha()
+                        if captcha_code:
+                            self.driver.find_element(By.ID, 'verifyCode').clear()
+                            self.driver.find_element(By.ID, 'verifyCode').send_keys(captcha_code)
+                            self.driver.execute_script("document.getElementById('studentLoginBtn').click();")
+                        login_start_time = time.time()  # 重置计时
+                        time.sleep(1)
+                    
                     elif page_state == 'login_page':
                         # 执行登录
                         self.status.emit("执行登录...")
@@ -481,12 +742,20 @@ class LoginWorker(QThread):
                         # 未知状态，等待
                         time.sleep(1)
                     
-                    # 超时检测
+                    # 超时检测 - 10秒没登进去就重启浏览器
                     if elapsed > max_login_time:
-                        self.status.emit(f"登录超时({int(elapsed)}秒)，刷新页面...")
-                        self.driver.refresh()
-                        login_start_time = time.time()  # 重置计时
-                        time.sleep(2)
+                        self.status.emit(f"登录超时({int(elapsed)}秒)，重启浏览器...")
+                        print(f"[WARN] 登录超时 {int(elapsed)} 秒，重启浏览器重新登录")
+                        # 关闭当前浏览器
+                        if self.driver:
+                            try:
+                                self.driver.quit()
+                            except:
+                                pass
+                            self.driver = None
+                        # 发出失败信号，触发自动重新登录
+                        self.failed.emit("浏览器已关闭，请重新登录")
+                        return
                     
                 except Exception as e:
                     error_msg = str(e)
@@ -1347,6 +1616,8 @@ class MultiGrabWorker(QThread):
         self._current_course_idx = 0
         self._not_found_times = {}  # 记录每个课程未找到的开始时间
         self._notified_courses = set()  # 已发送余课提醒的课程ID
+        self._last_refresh_time = time.time()  # 上次刷新页面的时间
+        self._refresh_interval = 10  # 每10秒刷新一次页面
     
     def stop(self):
         self._running = False
@@ -1375,6 +1646,7 @@ class MultiGrabWorker(QThread):
     
     def run(self):
         self.status.emit(f"[监控] 启动多课程监控，共 {len(self.courses)} 门课程")
+        self._last_refresh_time = time.time()  # 重置刷新时间
         
         while self._running and self.courses:
             try:
@@ -1385,6 +1657,14 @@ class MultiGrabWorker(QThread):
                         self.need_relogin.emit()  # 发出重新登录信号
                         return
                     time.sleep(1)
+                    continue
+                
+                # 每10秒刷新一次页面，确保数据最新
+                if time.time() - self._last_refresh_time >= self._refresh_interval:
+                    self.status.emit("[监控] 定时刷新页面...")
+                    self.driver.refresh()
+                    self._last_refresh_time = time.time()
+                    time.sleep(2)  # 等待页面加载
                     continue
                 
                 # 轮询每个课程
@@ -2027,21 +2307,111 @@ class MainWindow(QMainWindow):
         self.grab_workers = []
         self.multi_grab_worker = None  # 多课程监控线程
         self._pending_monitor_courses = []
+        self._current_screen = None  # 当前所在屏幕
+        self._main_splitter = None  # 主分割器引用
         
         self.init_ui()
         self.load_config()
+        self.adjust_for_screen()  # 根据屏幕调整大小
+        
+        # 监听窗口所在屏幕变化（多显示器支持）
+        self.windowHandle()  # 确保窗口句柄存在
         
         # 页面状态监控定时器 - 每2秒检查一次（快速响应登录状态变化）
         self.refresh_timer = QTimer()
         self.refresh_timer.timeout.connect(self.check_and_refresh)
         self.no_data_count = 0  # 连续无数据次数
     
+    def showEvent(self, event):
+        """窗口显示时连接屏幕变化信号"""
+        super().showEvent(event)
+        # 连接屏幕变化信号
+        if self.windowHandle():
+            self.windowHandle().screenChanged.connect(self._on_screen_changed)
+            self._current_screen = self.windowHandle().screen()
+    
+    def _on_screen_changed(self, screen):
+        """当窗口移动到不同屏幕时调用"""
+        if screen and screen != self._current_screen:
+            self._current_screen = screen
+            print(f"[INFO] 屏幕变化: {screen.name()} DPI={screen.logicalDotsPerInch()}")
+            # 延迟调整，等待窗口完全移动到新屏幕
+            QTimer.singleShot(100, self._adjust_for_current_screen)
+    
+    def _adjust_for_current_screen(self):
+        """当窗口移动到不同屏幕时，强制重新布局"""
+        if not self._current_screen:
+            return
+        
+        # 强制更新所有控件的几何信息
+        self.updateGeometry()
+        
+        # 遍历所有子控件，强制更新
+        for child in self.findChildren(QWidget):
+            child.updateGeometry()
+        
+        # 强制重新布局
+        if self.centralWidget() and self.centralWidget().layout():
+            self.centralWidget().layout().invalidate()
+            self.centralWidget().layout().activate()
+        
+        # 重新设置 splitter 比例
+        if hasattr(self, '_main_splitter') and self._main_splitter:
+            QTimer.singleShot(50, lambda: self._set_splitter_sizes(self._main_splitter))
+    
+    def adjust_for_screen(self):
+        """根据屏幕大小调整窗口 - 不做 DPI 缩放，让 Qt 自动处理"""
+        screen = QApplication.primaryScreen()
+        screen_geo = screen.availableGeometry()
+        screen_width = screen_geo.width()
+        screen_height = screen_geo.height()
+        
+        # 窗口占屏幕 85%，留出边距
+        width = int(screen_width * 0.85)
+        height = int(screen_height * 0.85)
+        
+        # 限制最小尺寸
+        width = max(width, 900)
+        height = max(height, 600)
+        
+        self.resize(width, height)
+        
+        # 居中显示
+        x = screen_geo.x() + (screen_width - width) // 2
+        y = screen_geo.y() + (screen_height - height) // 2
+        self.move(x, y)
+    
+    def _set_splitter_sizes(self, splitter):
+        """设置 splitter 初始大小"""
+        total_width = splitter.width()
+        if total_width > 0:
+            # 左:中:右 = 28%:44%:28%
+            left_width = int(total_width * 0.28)
+            middle_width = int(total_width * 0.44)
+            right_width = total_width - left_width - middle_width
+            splitter.setSizes([left_width, middle_width, right_width])
+    
+    def resizeEvent(self, event):
+        """窗口大小改变时自动调整布局"""
+        super().resizeEvent(event)
+        # 当窗口大小改变时（包括最大化），重新设置 splitter 比例
+        if hasattr(self, '_main_splitter') and self._main_splitter:
+            # 使用延迟确保布局已完成
+            QTimer.singleShot(10, lambda: self._set_splitter_sizes(self._main_splitter))
+    
+    def changeEvent(self, event):
+        """窗口状态改变时（最大化/还原）"""
+        super().changeEvent(event)
+        if event.type() == event.WindowStateChange:
+            # 窗口状态改变（最大化、最小化、还原等）
+            if hasattr(self, '_main_splitter') and self._main_splitter:
+                QTimer.singleShot(50, lambda: self._set_splitter_sizes(self._main_splitter))
+    
     def init_ui(self):
         self.setWindowTitle('YNU选课助手 Pro')
-        self.setMinimumSize(1280, 800)
-        self.resize(1440, 900)
+        self.setMinimumSize(900, 600)
         
-        # 设置明亮风格样式
+        # 设置明亮风格样式 - 使用 pt 单位确保跨 DPI 一致性
         self.setStyleSheet("""
             /* 主窗口背景 */
             QMainWindow {
@@ -2050,8 +2420,8 @@ class MainWindow(QMainWindow):
             
             /* 通用控件样式 */
             QWidget {
-                font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
-                font-size: 13px;
+                font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+                font-size: 9pt;
                 color: #1d1d1f;
             }
             
@@ -2059,83 +2429,53 @@ class MainWindow(QMainWindow):
             QGroupBox {
                 background-color: #ffffff;
                 border: 1px solid #d2d2d7;
-                border-radius: 10px;
-                margin-top: 14px;
-                padding: 16px 12px 12px 12px;
-                font-weight: bold;
+                border-radius: 8px;
             }
             QGroupBox::title {
-                subcontrol-origin: margin;
-                subcontrol-position: top left;
-                left: 12px;
-                padding: 0 6px;
                 color: #0066cc;
-                font-size: 12px;
+                font-weight: bold;
             }
             
-            /* 输入框 */
+            /* 输入框 - 移除固定尺寸，让 Qt 自动处理 */
             QLineEdit {
                 background-color: #ffffff;
                 border: 1px solid #d2d2d7;
-                border-radius: 6px;
-                padding: 8px 10px;
+                border-radius: 4px;
+                padding: 4px;
                 color: #1d1d1f;
                 selection-background-color: #0066cc;
             }
             QLineEdit:focus {
                 border: 1px solid #0066cc;
             }
-            QLineEdit:hover {
-                border: 1px solid #86868b;
-            }
             QLineEdit::placeholder {
                 color: #86868b;
             }
             
-            /* 下拉框 */
+            /* 下拉框 - 移除固定尺寸 */
             QComboBox {
                 background-color: #ffffff;
                 border: 1px solid #d2d2d7;
-                border-radius: 6px;
-                padding: 8px 28px 8px 10px;
+                border-radius: 4px;
+                padding: 4px;
                 color: #1d1d1f;
-                min-width: 100px;
-            }
-            QComboBox:hover {
-                border: 1px solid #86868b;
             }
             QComboBox:focus {
                 border: 1px solid #0066cc;
             }
-            QComboBox::drop-down {
-                subcontrol-origin: padding;
-                subcontrol-position: center right;
-                width: 20px;
-                border: none;
-            }
-            QComboBox::down-arrow {
-                width: 0;
-                height: 0;
-                border-left: 5px solid transparent;
-                border-right: 5px solid transparent;
-                border-top: 6px solid #86868b;
-            }
             QComboBox QAbstractItemView {
                 background-color: #ffffff;
                 border: 1px solid #d2d2d7;
-                border-radius: 6px;
                 selection-background-color: #e8e8ed;
                 color: #1d1d1f;
-                padding: 4px;
-                outline: none;
             }
             
-            /* 按钮 - 主要 */
+            /* 按钮 - 移除固定尺寸 */
             QPushButton {
                 background-color: #0066cc;
                 border: none;
-                border-radius: 6px;
-                padding: 8px 16px;
+                border-radius: 4px;
+                padding: 6px 12px;
                 color: #ffffff;
                 font-weight: bold;
             }
@@ -2154,80 +2494,29 @@ class MainWindow(QMainWindow):
             QListWidget {
                 background-color: #ffffff;
                 border: 1px solid #d2d2d7;
-                border-radius: 8px;
-                padding: 4px;
-                outline: none;
+                border-radius: 4px;
             }
             QListWidget::item {
                 background-color: #f5f5f7;
-                border-radius: 6px;
-                padding: 10px;
-                margin: 3px 2px;
-                border-left: 3px solid transparent;
+                border-radius: 3px;
+                padding: 6px;
+                margin: 2px;
             }
             QListWidget::item:hover {
                 background-color: #e8e8ed;
-                border-left: 3px solid #86868b;
             }
             QListWidget::item:selected {
-                background-color: #e8e8ed;
-                border-left: 3px solid #0066cc;
+                background-color: #cce4ff;
             }
             
             /* 文本编辑框（日志区域） */
             QTextEdit {
                 background-color: #1d1d1f;
                 border: 1px solid #d2d2d7;
-                border-radius: 8px;
-                padding: 8px;
+                border-radius: 4px;
+                padding: 4px;
                 color: #a6e3a1;
-                font-family: "Consolas", "JetBrains Mono", monospace;
-                font-size: 11px;
-            }
-            
-            /* 滚动区域 */
-            QScrollArea {
-                background-color: transparent;
-                border: none;
-            }
-            QScrollArea > QWidget > QWidget {
-                background-color: transparent;
-            }
-            
-            /* 滚动条 */
-            QScrollBar:vertical {
-                background-color: #f5f5f7;
-                width: 8px;
-                border-radius: 4px;
-                margin: 2px;
-            }
-            QScrollBar::handle:vertical {
-                background-color: #c7c7cc;
-                border-radius: 4px;
-                min-height: 30px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background-color: #a1a1a6;
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                height: 0;
-            }
-            QScrollBar:horizontal {
-                background-color: #f5f5f7;
-                height: 8px;
-                border-radius: 4px;
-                margin: 2px;
-            }
-            QScrollBar::handle:horizontal {
-                background-color: #c7c7cc;
-                border-radius: 4px;
-                min-width: 30px;
-            }
-            QScrollBar::handle:horizontal:hover {
-                background-color: #a1a1a6;
-            }
-            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
-                width: 0;
+                font-family: "Consolas", monospace;
             }
             
             /* 标签 */
@@ -2236,58 +2525,53 @@ class MainWindow(QMainWindow):
                 background: transparent;
             }
             
+            /* 复选框 */
+            QCheckBox {
+                color: #1d1d1f;
+            }
+            
+            /* 滚动区域 */
+            QScrollArea {
+                background-color: transparent;
+                border: none;
+            }
+            
+            /* 滚动条 */
+            QScrollBar:vertical {
+                background-color: #f5f5f7;
+                width: 10px;
+            }
+            QScrollBar::handle:vertical {
+                background-color: #c7c7cc;
+                border-radius: 5px;
+            }
+            QScrollBar:horizontal {
+                background-color: #f5f5f7;
+                height: 10px;
+            }
+            QScrollBar::handle:horizontal {
+                background-color: #c7c7cc;
+                border-radius: 5px;
+            }
+            
             /* 进度条 */
             QProgressBar {
                 background-color: #e8e8ed;
                 border: none;
-                border-radius: 4px;
-                height: 6px;
-                text-align: center;
+                border-radius: 3px;
             }
             QProgressBar::chunk {
                 background-color: #0066cc;
-                border-radius: 4px;
-            }
-            
-            /* 复选框 */
-            QCheckBox {
-                color: #1d1d1f;
-                spacing: 8px;
-            }
-            QCheckBox::indicator {
-                width: 16px;
-                height: 16px;
-                border-radius: 4px;
-                border: 2px solid #d2d2d7;
-                background-color: #ffffff;
-            }
-            QCheckBox::indicator:hover {
-                border: 2px solid #0066cc;
-            }
-            QCheckBox::indicator:checked {
-                background-color: #0066cc;
-                border: 2px solid #0066cc;
+                border-radius: 3px;
             }
             
             /* 数字输入框 */
             QSpinBox {
                 background-color: #ffffff;
                 border: 1px solid #d2d2d7;
-                border-radius: 6px;
-                padding: 6px 10px;
+                border-radius: 4px;
+                padding: 4px;
                 color: #1d1d1f;
-            }
-            QSpinBox:hover {
-                border: 1px solid #86868b;
-            }
-            QSpinBox::up-button, QSpinBox::down-button {
-                background-color: #e8e8ed;
-                border: none;
-                width: 20px;
-                border-radius: 3px;
-            }
-            QSpinBox::up-button:hover, QSpinBox::down-button:hover {
-                background-color: #d2d2d7;
             }
             
             /* 状态栏 */
@@ -2295,31 +2579,40 @@ class MainWindow(QMainWindow):
                 background-color: #ffffff;
                 color: #86868b;
                 border-top: 1px solid #d2d2d7;
-                font-size: 11px;
             }
             
             /* 消息框 */
             QMessageBox {
                 background-color: #ffffff;
             }
-            QMessageBox QLabel {
-                color: #1d1d1f;
-            }
         """)
         
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QHBoxLayout(central)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(10)
+        
+        # 使用 QSplitter 让面板可调整大小
+        splitter = QSplitter(Qt.Horizontal)
         
         # ===== 左侧：设置和课程列表 =====
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
-        left_panel.setMinimumWidth(380)
-        left_panel.setMaximumWidth(420)
+        left_layout.setSpacing(6)
+        left_layout.setContentsMargins(6, 6, 6, 6)
         
-        # 登录设置
-        login_group = QGroupBox("登录设置")
-        login_layout = QVBoxLayout(login_group)
+        # 登录设置标题
+        login_title = QLabel("🔐 登录设置")
+        login_title.setStyleSheet("font-weight: bold; color: #0066cc; font-size: 10pt; padding: 2px 0;")
+        left_layout.addWidget(login_title)
+        
+        # 登录设置容器（用 QFrame 代替 QGroupBox 避免标题重叠问题）
+        login_frame = QFrame()
+        login_frame.setStyleSheet("QFrame { background-color: #ffffff; border: 1px solid #d2d2d7; border-radius: 8px; }")
+        login_layout = QVBoxLayout(login_frame)
+        login_layout.setSpacing(6)
+        login_layout.setContentsMargins(10, 10, 10, 10)
         
         self.username_input = QLineEdit()
         self.username_input.setPlaceholderText("学号")
@@ -2336,18 +2629,20 @@ class MainWindow(QMainWindow):
         login_layout.addWidget(self.driver_path_input)
         
         round_layout = QHBoxLayout()
+        round_layout.setSpacing(10)
         round_layout.addWidget(QLabel("选课轮次:"))
         self.round_combo = QComboBox()
         self.round_combo.addItems(["第一轮", "第二轮"])
         self.round_combo.setCurrentIndex(1)
         round_layout.addWidget(self.round_combo)
+        round_layout.addStretch()
         login_layout.addLayout(round_layout)
         
         self.login_btn = QPushButton("🚀 启动登录")
         self.login_btn.clicked.connect(self.login)
         login_layout.addWidget(self.login_btn)
         
-        self.logout_btn = QPushButton("🚪 退出登录")
+        self.logout_btn = QPushButton("� 退出登录")
         self.logout_btn.setStyleSheet("background-color: #ff3b30; color: #ffffff;")
         self.logout_btn.clicked.connect(self.logout)
         self.logout_btn.setEnabled(False)
@@ -2359,14 +2654,15 @@ class MainWindow(QMainWindow):
         
         # 微信推送设置（可折叠）
         self.wechat_toggle_btn = QPushButton("📱 微信推送 ▶")
-        self.wechat_toggle_btn.setStyleSheet("background: transparent; border: none; text-align: left; color: #86868b; padding: 5px 0; font-weight: normal;")
+        self.wechat_toggle_btn.setStyleSheet("background: transparent; border: none; text-align: left; color: #86868b; font-weight: normal;")
         self.wechat_toggle_btn.setCursor(Qt.PointingHandCursor)
         self.wechat_toggle_btn.clicked.connect(self._toggle_wechat_settings)
         login_layout.addWidget(self.wechat_toggle_btn)
         
         self.wechat_widget = QWidget()
         wechat_layout = QVBoxLayout(self.wechat_widget)
-        wechat_layout.setContentsMargins(0, 0, 0, 0)
+        wechat_layout.setContentsMargins(0, 4, 0, 4)
+        wechat_layout.setSpacing(4)
         
         self.wechat_enable_cb = QCheckBox("启用微信推送")
         wechat_layout.addWidget(self.wechat_enable_cb)
@@ -2378,67 +2674,73 @@ class MainWindow(QMainWindow):
         self.wechat_widget.setVisible(False)
         login_layout.addWidget(self.wechat_widget)
         
-        left_layout.addWidget(login_group)
+        left_layout.addWidget(login_frame)
         
         # 课程类型选择
         type_layout = QHBoxLayout()
+        type_layout.setSpacing(8)
         type_layout.addWidget(QLabel("课程类型:"))
         self.course_type_combo = QComboBox()
         self.course_type_combo.addItems(list(COURSE_TYPES.keys()))
         self.course_type_combo.currentTextChanged.connect(self.on_course_type_changed)
         type_layout.addWidget(self.course_type_combo)
+        type_layout.addStretch()
         left_layout.addLayout(type_layout)
         
         # 筛选条件
         filter_layout1 = QHBoxLayout()
+        filter_layout1.setSpacing(6)
         filter_layout1.addWidget(QLabel("冲突:"))
         self.conflict_combo = QComboBox()
         self.conflict_combo.addItems(["全部", "冲突", "不冲突"])
-        self.conflict_combo.setFixedWidth(70)
         self.conflict_combo.currentIndexChanged.connect(self.on_filter_changed)
         filter_layout1.addWidget(self.conflict_combo)
         
         filter_layout1.addWidget(QLabel("已满:"))
         self.full_combo = QComboBox()
         self.full_combo.addItems(["全部", "已满", "未满"])
-        self.full_combo.setFixedWidth(70)
         self.full_combo.currentIndexChanged.connect(self.on_filter_changed)
         filter_layout1.addWidget(self.full_combo)
+        filter_layout1.addStretch()
         left_layout.addLayout(filter_layout1)
         
-        # 课程类别筛选（通识教育选修课程显示"通识类别"，其他显示"课程类别"）
+        # 课程类别筛选
         filter_layout2 = QHBoxLayout()
+        filter_layout2.setSpacing(6)
         self.category_label = QLabel("课程类别:")
         filter_layout2.addWidget(self.category_label)
         self.category_combo = QComboBox()
-        # 默认显示推荐课程的课程类别选项
         self._init_category_options('推荐课程')
-        self.category_combo.setFixedWidth(160)
         self.category_combo.currentIndexChanged.connect(self.on_filter_changed)
         filter_layout2.addWidget(self.category_combo)
+        filter_layout2.addStretch()
         filter_layout2.addStretch()
         left_layout.addLayout(filter_layout2)
         
         # 关键字搜索
         search_layout = QHBoxLayout()
+        search_layout.setSpacing(5)
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("关键字搜索")
         self.search_input.returnPressed.connect(self.on_search)
         search_layout.addWidget(self.search_input)
         self.search_btn = QPushButton("🔍")
-        self.search_btn.setFixedWidth(30)
         self.search_btn.clicked.connect(self.on_search)
         search_layout.addWidget(self.search_btn)
         left_layout.addLayout(search_layout)
         
         # 课程列表
-        left_layout.addWidget(QLabel("📚 课程列表"))
+        course_label = QLabel("📚 课程列表")
+        course_label.setStyleSheet("font-weight: bold; margin-top: 5px;")
+        left_layout.addWidget(course_label)
         self.course_list = QListWidget()
         self.course_list.itemClicked.connect(self.on_course_selected)
-        left_layout.addWidget(self.course_list)
+        self.course_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        left_layout.addWidget(self.course_list, 2)  # stretch factor = 2，让课程列表占更多空间
         
         # 翻页控制
         page_layout = QHBoxLayout()
+        page_layout.setSpacing(6)
         self.prev_page_btn = QPushButton("◀ 上一页")
         self.prev_page_btn.clicked.connect(self.on_prev_page)
         page_layout.addWidget(self.prev_page_btn)
@@ -2453,13 +2755,15 @@ class MainWindow(QMainWindow):
         left_layout.addLayout(page_layout)
         
         self.course_count_label = QLabel("共 0 门课程")
+        self.course_count_label.setStyleSheet("color: #86868b;")
         left_layout.addWidget(self.course_count_label)
         
-        main_layout.addWidget(left_panel)
+        splitter.addWidget(left_panel)
         
         # ===== 中间：排课卡片 =====
         middle_panel = QWidget()
         middle_layout = QVBoxLayout(middle_panel)
+        middle_layout.setContentsMargins(6, 6, 6, 6)
         
         self.schedule_title = QLabel("📋 排课详情")
         self.schedule_title.setStyleSheet("font-weight: bold; font-size: 14px;")
@@ -2473,14 +2777,14 @@ class MainWindow(QMainWindow):
         scroll.setWidget(cards_widget)
         middle_layout.addWidget(scroll)
         
-        main_layout.addWidget(middle_panel, 2)
+        splitter.addWidget(middle_panel)
         
         # ===== 右侧：待抢列表和日志 =====
         right_panel = QWidget()
         right_panel.setStyleSheet("background-color: #ffffff; border-left: 1px solid #d2d2d7;")
         right_layout = QVBoxLayout(right_panel)
-        right_panel.setMinimumWidth(320)
-        right_panel.setMaximumWidth(380)
+        right_layout.setContentsMargins(6, 6, 6, 6)
+        right_layout.setSpacing(5)
         
         # 待抢列表标题
         grab_title = QLabel("🎯 任务队列")
@@ -2488,8 +2792,7 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(grab_title)
         
         self.grab_list = QListWidget()
-        self.grab_list.setMinimumHeight(180)
-        self.grab_list.setMaximumHeight(250)
+        self.grab_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         right_layout.addWidget(self.grab_list)
         
         self.grab_count_label = QLabel("待抢: 0 门")
@@ -2522,9 +2825,28 @@ class MainWindow(QMainWindow):
         
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        right_layout.addWidget(self.log_text)
+        self.log_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        right_layout.addWidget(self.log_text, 1)  # stretch factor = 1
         
-        main_layout.addWidget(right_panel)
+        splitter.addWidget(right_panel)
+        
+        # 设置 splitter 初始比例
+        splitter.setStretchFactor(0, 2)  # 左侧
+        splitter.setStretchFactor(1, 3)  # 中间
+        splitter.setStretchFactor(2, 2)  # 右侧
+        
+        # 禁止面板被完全折叠，但不设置固定最小宽度（让 Qt 自动处理 DPI 缩放）
+        splitter.setCollapsible(0, False)
+        splitter.setCollapsible(1, False)
+        splitter.setCollapsible(2, False)
+        
+        # 保存 splitter 引用，用于窗口大小改变时重新设置比例
+        self._main_splitter = splitter
+        
+        main_layout.addWidget(splitter)
+        
+        # 延迟设置初始大小（等窗口显示后）
+        QTimer.singleShot(100, lambda: self._set_splitter_sizes(splitter))
         
         # 进度条
         self.progress_bar = QProgressBar()
@@ -2720,6 +3042,9 @@ class MainWindow(QMainWindow):
         visible = not self.wechat_widget.isVisible()
         self.wechat_widget.setVisible(visible)
         self.wechat_toggle_btn.setText("📱 微信推送 ▼" if visible else "📱 微信推送 ▶")
+        
+        # 强制更新布局，确保展开/折叠后布局正确
+        QTimer.singleShot(10, lambda: self.centralWidget().layout().activate() if self.centralWidget() else None)
     
     def send_wechat_notify(self, title, content):
         """发送微信推送"""
@@ -2751,12 +3076,16 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)
         
+        # 显示登录提示
+        self.statusBar().showMessage("💡 全自动登录，无需额外操作，请稍候...")
+        
         selected_round = "1" if self.round_combo.currentIndex() == 0 else "2"
         
         self.login_worker = LoginWorker(driver_path, username, password, selected_round)
         self.login_worker.success.connect(self.on_login_success)
         self.login_worker.failed.connect(self.on_login_failed)
-        self.login_worker.status.connect(lambda msg: self.statusBar().showMessage(msg))
+        self.login_worker.status.connect(lambda msg: self.statusBar().showMessage(f"💡 全自动登录中: {msg}"))
+        self.login_worker.auto_download_driver.connect(self.on_auto_download_driver)
         self.login_worker.start()
     
     def on_login_success(self, cookies, token, batch_code, student_code, driver):
@@ -2775,6 +3104,9 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         
         self.log("[SUCCESS] 登录成功！")
+        
+        # 显示操作提示
+        self.statusBar().showMessage("⚠️ 请尽量在程序界面中操作，避免直接操作浏览器窗口")
         
         # 登录成功后立即刷新课程列表
         QTimer.singleShot(500, self.refresh_courses)
@@ -2796,7 +3128,29 @@ class MainWindow(QMainWindow):
         self.login_btn.setText("🚀 启动登录")
         self.logout_btn.setEnabled(False)
         self.progress_bar.setVisible(False)
+        
+        # 检查是否是浏览器关闭导致的失败 - 自动重新登录，不弹窗
+        if "浏览器已关闭" in error:
+            self.log("[INFO] 检测到浏览器关闭，3秒后自动重新登录...")
+            self.statusBar().showMessage("🔄 浏览器已关闭，3秒后自动重新登录...")
+            QTimer.singleShot(3000, self.login)
+            return
+        
+        # 密码错误等其他错误，弹窗提示
         QMessageBox.warning(self, "登录失败", error)
+    
+    def on_auto_download_driver(self):
+        """自动下载 ChromeDriver 时显示提示"""
+        self.log("[INFO] 首次运行或版本更新，正在下载 ChromeDriver...")
+        QMessageBox.information(
+            self, 
+            "首次运行 - 下载驱动", 
+            "正在自动下载与您的 Chrome 浏览器匹配的驱动程序。\n\n"
+            "⏳ 首次下载可能需要 1-2 分钟，请耐心等待...\n\n"
+            "✅ 下载完成后会自动缓存到本地，\n"
+            "    之后启动将直接使用缓存，无需重复下载。\n\n"
+            "💡 如果下载失败，请检查网络连接。"
+        )
     
     def logout(self):
         """退出登录"""
