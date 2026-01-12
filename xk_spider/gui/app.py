@@ -472,22 +472,35 @@ class LoginWorker(QThread):
                         time.sleep(2)
                     
                 except Exception as e:
+                    error_msg = str(e)
+                    # 检测浏览器是否被关闭
+                    if 'no such window' in error_msg or 'target window already closed' in error_msg or 'web view not found' in error_msg or 'invalid session id' in error_msg:
+                        self.failed.emit("浏览器已关闭，请重新登录")
+                        self.driver = None
+                        return
                     print(f"[ERROR] 监控页面出错: {e}")
                     time.sleep(1)
             
             # 循环获取token和batchCode
             token, batch_code = '', ''
             for _ in range(30):
-                time.sleep(1)
-                token = self.driver.execute_script('return sessionStorage.getItem("token");') or ''
-                batch_str = self.driver.execute_script('return sessionStorage.getItem("currentBatch");') or ''
-                if batch_str:
-                    try:
-                        batch_code = json.loads(batch_str).get('code', '')
-                    except:
-                        pass
-                if token and batch_code:
-                    break
+                try:
+                    time.sleep(1)
+                    token = self.driver.execute_script('return sessionStorage.getItem("token");') or ''
+                    batch_str = self.driver.execute_script('return sessionStorage.getItem("currentBatch");') or ''
+                    if batch_str:
+                        try:
+                            batch_code = json.loads(batch_str).get('code', '')
+                        except:
+                            pass
+                    if token and batch_code:
+                        break
+                except Exception as e:
+                    error_msg = str(e)
+                    if 'no such window' in error_msg or 'target window already closed' in error_msg or 'web view not found' in error_msg or 'invalid session id' in error_msg:
+                        self.failed.emit("浏览器已关闭，请重新登录")
+                        self.driver = None
+                        return
             
             if not token or not batch_code:
                 self.failed.emit("登录信息获取失败")
@@ -505,11 +518,23 @@ class LoginWorker(QThread):
         except TimeoutException:
             self.failed.emit("登录超时")
             if self.driver:
-                self.driver.quit()
+                try:
+                    self.driver.quit()
+                except:
+                    pass
         except Exception as e:
+            error_msg = str(e)
+            # 检测浏览器是否被关闭
+            if 'no such window' in error_msg or 'target window already closed' in error_msg or 'web view not found' in error_msg or 'invalid session id' in error_msg:
+                self.failed.emit("浏览器已关闭，请重新登录")
+                self.driver = None
+                return
             self.failed.emit(f"登录错误: {e}")
             if self.driver:
-                self.driver.quit()
+                try:
+                    self.driver.quit()
+                except:
+                    pass
 
 
 class GrabWorker(QThread):
@@ -2577,9 +2602,18 @@ class MainWindow(QMainWindow):
                             webbrowser.open("https://github.com/YHalo-wyh/YNU-xk_spider/releases")
                 else:
                     QMessageBox.information(self, "检查更新", f"当前已是最新版本 {current_version}")
+            elif response.status_code == 404:
+                # 没有发布任何 Release
+                QMessageBox.information(self, "检查更新", f"当前版本：beta\n\n暂无新版本发布")
             else:
-                QMessageBox.warning(self, "检查更新", "无法获取版本信息，请稍后重试")
+                QMessageBox.warning(self, "检查更新", f"无法获取版本信息 (HTTP {response.status_code})")
             self.statusBar().showMessage("检查更新完成", 3000)
+        except requests.exceptions.Timeout:
+            QMessageBox.warning(self, "检查更新", "连接超时，请检查网络后重试")
+            self.statusBar().showMessage("检查更新超时", 3000)
+        except requests.exceptions.ConnectionError:
+            QMessageBox.warning(self, "检查更新", "网络连接失败，请检查网络后重试")
+            self.statusBar().showMessage("网络连接失败", 3000)
         except Exception as e:
             QMessageBox.warning(self, "检查更新", f"检查更新失败：{str(e)}")
             self.statusBar().showMessage("检查更新失败", 3000)
