@@ -69,7 +69,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Chrome 版本要求：132.x（需下载对应版本的 ChromeDriver）
+Chrome 版本要求：132.0.6834.160（需下载对应版本的 ChromeDriver）
 
 ## ⚠️ 免责声明
 
