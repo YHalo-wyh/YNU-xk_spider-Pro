@@ -2530,9 +2530,10 @@ class MainWindow(QMainWindow):
         """显示关于对话框"""
         about_text = """
 <h2>YNU选课助手 Pro</h2>
-<p>版本：测试版 (Beta)</p>
-<p>适配 Chrome：132.0.6834.160</p>
+<p>版本：测试版 (Beta) - 2026.01</p>
+<p>适配 Chrome：132.x</p>
 <p>作者：YHalo-wyh</p>
+<p>原项目：<a href="https://github.com/starwingChen/YNU-xk_spider">starwingChen/YNU-xk_spider</a></p>
 <p>GitHub：<a href="https://github.com/YHalo-wyh/YNU-xk_spider">https://github.com/YHalo-wyh/YNU-xk_spider</a></p>
 
 <h3>📱 微信推送配置</h3>

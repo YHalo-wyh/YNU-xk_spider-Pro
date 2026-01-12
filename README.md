@@ -1,5 +1,7 @@
 ﻿# YNU选课助手 Pro
 
+> Forked from [starwingChen/YNU-xk_spider](https://github.com/starwingChen/YNU-xk_spider)
+
 云南大学选课辅助工具，支持课程监控、自动抢课、微信推送等功能。
 
 ## ✨ 功能特性
