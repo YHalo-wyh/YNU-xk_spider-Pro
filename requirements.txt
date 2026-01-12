@@ -1,0 +1,19 @@
+# YNU选课助手 Pro 依赖包
+
+# GUI框架
+PyQt5>=5.15.0
+
+# 网络请求
+requests>=2.28.0
+
+# 浏览器自动化
+selenium>=4.10.0
+
+# 验证码识别
+ddddocr>=1.4.0
+
+# 图像处理 (ddddocr依赖)
+Pillow>=9.0.0
+
+# 打包为exe (可选)
+# pyinstaller>=6.0.0

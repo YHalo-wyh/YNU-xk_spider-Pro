@@ -1,0 +1,7 @@
+{
+  "username": "",
+  "password": "",
+  "driver_path": "chromedriver-win64/chromedriver.exe",
+  "wechat_enable": false,
+  "sendkey": ""
+}
