@@ -49,11 +49,13 @@ def build_exe():
         "--collect-all=ddddocr",
         "--collect-all=onnxruntime",
         "--collect-all=webdriver_manager",
+        "--collect-all=certifi",
         # 隐藏导入
         "--hidden-import=PyQt5.sip",
         "--hidden-import=PIL._tkinter_finder",
         "--hidden-import=webdriver_manager",
         "--hidden-import=webdriver_manager.chrome",
+        "--hidden-import=certifi",
     ]
     
     if os.path.exists("icon.ico"):
