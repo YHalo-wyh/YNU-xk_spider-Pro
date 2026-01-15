@@ -77,11 +77,6 @@ pip install -r requirements.txt
 python run_gui.py
 ```
 
-### 打包
-
-```bash
-python build.py
-```
 
 需要安装 [NSIS](https://nsis.sourceforge.io/) 用于生成安装包。
 

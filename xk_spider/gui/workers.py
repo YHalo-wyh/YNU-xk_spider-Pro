@@ -684,10 +684,17 @@ class MultiGrabWorker(QThread):
         POST /elective/volunteer.do
         参数: addParam={"data": {...}}
         返回: (success: bool, msg: str, need_rollback: bool)
+        
+        修复: 正确处理 course_type 为数字字符串的情况
         """
         tc_id = course.get('JXBID', '')
         course_type = course.get('type', 'recommend')
-        course_type_code = get_course_type_code(course_type)
+        
+        # 修复: 处理 course_type 为数字字符串的情况（直接使用，不查字典）
+        if isinstance(course_type, str) and course_type.isdigit():
+            course_type_code = course_type
+        else:
+            course_type_code = get_course_type_code(course_type)
         
         try:
             url = f"{BASE_URL}/elective/volunteer.do"
@@ -944,6 +951,8 @@ class MultiGrabWorker(QThread):
         解析教务系统时间格式
         输入: "1-18周 星期二 5-6节" 或 "1-18周 星期二 第5-6节" 或 "1-9周 星期一 1-2节, 11-18周 星期一 1-2节"
         输出: [{'weeks': set, 'day': int, 'periods': set}, ...]
+        
+        修复: 支持 "第5-6节" 和 "第5节" 格式
         """
         if not time_str:
             self._logger.debug(f"时间字符串为空")
@@ -993,7 +1002,8 @@ class MultiGrabWorker(QThread):
                 slot['day'] = day_map.get(day_char, 0)
             
             # 解析节次: "5-6节" 或 "第5-6节" 或 "5,6节" 或 "第5节"
-            # 先尝试范围格式
+            # 修复: 正确处理"第"字前缀
+            # 先尝试范围格式: "第5-6节" 或 "5-6节"
             period_match = re.search(r'第?(\d+)-(\d+)节', segment)
             if period_match:
                 start_period = int(period_match.group(1))
@@ -1001,15 +1011,22 @@ class MultiGrabWorker(QThread):
                 for p in range(start_period, end_period + 1):
                     slot['periods'].add(p)
             else:
-                # 尝试单节或逗号分隔: "第5节" 或 "5,6节"
-                period_singles = re.findall(r'第?(\d+)节', segment)
-                for p in period_singles:
-                    slot['periods'].add(int(p))
-                # 也尝试匹配 "5,6节" 格式
-                comma_periods = re.search(r'(\d+(?:,\d+)+)节', segment)
-                if comma_periods:
-                    for p in comma_periods.group(1).split(','):
+                # 尝试单节格式: "第5节" 或 "5节"
+                period_singles = re.findall(r'第(\d+)节', segment)
+                if period_singles:
+                    for p in period_singles:
                         slot['periods'].add(int(p))
+                else:
+                    # 尝试不带"第"字的格式: "5节" 或 "5,6节"
+                    period_singles = re.findall(r'(\d+)节', segment)
+                    for p in period_singles:
+                        slot['periods'].add(int(p))
+                    # 也尝试匹配逗号分隔: "5,6节"
+                    comma_periods = re.search(r'(\d+(?:,\d+)+)节', segment)
+                    if comma_periods:
+                        for p in comma_periods.group(1).split(','):
+                            if p.strip():
+                                slot['periods'].add(int(p.strip()))
             
             # 只有解析出有效数据才添加
             if slot['weeks'] and slot['day'] and slot['periods']:
@@ -1143,12 +1160,12 @@ class MultiGrabWorker(QThread):
     
     def _handle_conflict_rollback(self, course):
         """
-        处理时间冲突的自动换课机制
+        处理时间冲突的自动换课机制 - 亡命回滚版本
         Step 1: 智能定位冲突课程
         Step 2: 退掉冲突的旧课
         Step 3: 抢入目标课程
         Step 4: 核实是否成功
-        Step 5: 失败则回滚（重新选回旧课）
+        Step 5: 失败则进入紧急救援模式 - 持续5分钟死磕回滚
         
         返回: (success: bool, conflict_course_info: dict or None)
         """
@@ -1207,22 +1224,70 @@ class MultiGrabWorker(QThread):
                 self._logger.info(f"换课可能成功: {course_name}")
                 return True, conflict_course
         
-        # Step 5: 选课失败，回滚 - 重新选回旧课
-        self.status.emit(f"[换课] Step 5: 选课失败({msg})，回滚中...")
-        self._logger.warning(f"选课失败: {course_name}, 原因: {msg}, 开始回滚")
+        # Step 5: 选课失败，进入紧急救援模式 - 亡命回滚
+        self.status.emit(f"[换课] Step 5: 选课失败({msg})，进入紧急救援模式...")
+        self._logger.warning(f"选课失败: {course_name}, 原因: {msg}, 开始亡命回滚")
         
-        rollback_success, rollback_msg, _ = self._api_select_course_fast({
-            'JXBID': conflict_tc_id, 
-            'type': conflict_type
-        })
+        # 紧急救援参数
+        DESPERATE_RECOVERY_DURATION = 300  # 5分钟 = 300秒
+        RETRY_INTERVAL = 0.7  # 0.7秒间隔（高频但不过分）
         
-        if rollback_success:
-            self.status.emit(f"[换课] 回滚成功，已恢复 {conflict_name}")
-            self._logger.info(f"回滚成功: {conflict_name}")
-        else:
-            self.status.emit(f"[换课] ⚠️ 回滚失败！请手动检查 {conflict_name}")
-            self._logger.error(f"回滚失败: {conflict_name}, 原因: {rollback_msg}")
+        rollback_start_time = time.time()
+        attempt_count = 0
         
+        self.status.emit(f"[紧急救援] 🚨 开始死磕回滚 {conflict_name}，持续5分钟...")
+        self._logger.error(f"进入紧急救援模式: 尝试抢回 {conflict_name}")
+        
+        while self._running:
+            elapsed = time.time() - rollback_start_time
+            
+            # 超时检查
+            if elapsed >= DESPERATE_RECOVERY_DURATION:
+                self.status.emit(f"[紧急救援] ⚠️ 超时5分钟，停止回滚。请手动检查 {conflict_name}")
+                self._logger.error(f"紧急救援超时: {conflict_name}, 尝试次数: {attempt_count}")
+                return False, conflict_course
+            
+            attempt_count += 1
+            remaining = int(DESPERATE_RECOVERY_DURATION - elapsed)
+            
+            # 每10次尝试更新一次状态（减少UI刷新）
+            if attempt_count % 10 == 1:
+                self.status.emit(
+                    f"[紧急救援] 🔄 第{attempt_count}次尝试抢回 {conflict_name} "
+                    f"(剩余{remaining}秒)"
+                )
+            
+            # 尝试选回旧课
+            rollback_success, rollback_msg, _ = self._api_select_course_fast({
+                'JXBID': conflict_tc_id, 
+                'type': conflict_type
+            })
+            
+            # 心跳维持（防止UI假死）
+            self._increment_request_count()
+            
+            if rollback_success:
+                # 核实是否真的选上了
+                time.sleep(0.3)
+                is_selected = self._check_course_selected(conflict_tc_id)
+                
+                if is_selected or is_selected is None:
+                    self.status.emit(f"[紧急救援] ✓ 成功抢回 {conflict_name}！(尝试{attempt_count}次)")
+                    self._logger.info(f"紧急救援成功: {conflict_name}, 尝试次数: {attempt_count}")
+                    return False, conflict_course
+            
+            # 检查是否因为"已选"而失败（说明已经抢回了）
+            if rollback_msg and ('已选' in rollback_msg or '重复' in rollback_msg):
+                self.status.emit(f"[紧急救援] ✓ {conflict_name} 已在课表中！")
+                self._logger.info(f"紧急救援成功(已选): {conflict_name}")
+                return False, conflict_course
+            
+            # 短暂休眠后继续
+            time.sleep(RETRY_INTERVAL)
+        
+        # 被外部停止
+        self.status.emit(f"[紧急救援] 监控已停止，请手动检查 {conflict_name}")
+        self._logger.warning(f"紧急救援被中断: {conflict_name}")
         return False, conflict_course
 
     def _do_relogin(self):
@@ -1354,8 +1419,13 @@ class MultiGrabWorker(QThread):
     
     def _monitor_course_loop(self, course):
         """
-        单门课程的独立监控循环
+        单门课程的独立监控循环 - 安全优先版本
         每门课程在自己的线程中独立运行，互不阻塞
+        
+        核心安全策略:
+        1. 彻底删除盲抢逻辑 - 查询失败时直接跳过
+        2. 最高优先级检查 isFull 字段 - 防止幽灵余量
+        3. 仅当 isFull=False 且 remain>0 时才允许抢课
         """
         tc_id = course.get('JXBID', '')
         course_name = course.get('KCM', '')
@@ -1365,11 +1435,7 @@ class MultiGrabWorker(QThread):
         self._course_states[tc_id] = {
             'last_remain': -999,
             'last_status': '',
-            'blind_grab_count': 0,
         }
-        
-        consecutive_failures = 0
-        max_blind_grabs = 3
         
         while self._running:
             # 检查课程是否还在列表中
@@ -1391,36 +1457,17 @@ class MultiGrabWorker(QThread):
             
             state = self._course_states.get(tc_id, {})
             
-            # 查询失败 - 盲抢机制
+            # ========== 安全策略 1: 彻底删除盲抢逻辑 ==========
+            # 查询失败 (remain is None) - 直接跳过，绝不盲抢
             if remain is None:
-                consecutive_failures += 1
+                if state.get('last_status') != 'query_failed':
+                    self.status.emit(f"[SKIP] {course_name} 查询失败，跳过本次循环（安全模式）")
+                    self._logger.warning(f"查询失败，跳过: {course_name}")
+                    state['last_status'] = 'query_failed'
                 
-                if consecutive_failures >= 3 and state.get('blind_grab_count', 0) < max_blind_grabs:
-                    # 触发盲抢
-                    self.status.emit(f"[BLIND] {course_name} 查询失败，尝试盲抢...")
-                    success, msg, need_rollback = self._api_select_course_fast(course)
-                    
-                    state['blind_grab_count'] = state.get('blind_grab_count', 0) + 1
-                    
-                    if success:
-                        self.success.emit(f"🎉 盲抢成功: {course_name} - {teacher}", course)
-                        # Server酱通知：盲抢成功
-                        if self.serverchan_key:
-                            send_notification(
-                                self.serverchan_key,
-                                f"🎉 抢课成功: {course_name}",
-                                f"**课程**: {course_name}\n\n**教师**: {teacher}\n\n**方式**: 盲抢成功"
-                            )
-                        self._remove_course_safe(tc_id)
-                        break
-                    elif msg == "session_expired":
-                        self.need_relogin.emit()
-                        break
-                
+                # 休眠后继续下次查询
                 time.sleep(1.5)
                 continue
-            
-            consecutive_failures = 0
             
             # 状态变化检测（减少日志噪音）
             last_remain = state.get('last_remain', -999)
@@ -1433,10 +1480,40 @@ class MultiGrabWorker(QThread):
                 self._remove_course_safe(tc_id)
                 break
             
-            # 有余量！
+            # ========== 安全策略 2: 最高优先级检查 isFull ==========
+            # 必须首先检查 isFull 字段（系统标记）
+            is_full_flag = course_info.get('isFull', False) if course_info else False
+            
+            # 幽灵余量防御：即使计算出 remain > 0，但 isFull=True 时，绝对禁止抢课
+            if is_full_flag:
+                if remain > 0:
+                    # 发现幽灵余量！
+                    if state.get('last_status') != 'ghost_capacity':
+                        self.status.emit(
+                            f"[GHOST] {course_name} 显示余量{remain}但isFull=True，"
+                            f"跳过以防误退课（幽灵余量）"
+                        )
+                        self._logger.warning(
+                            f"幽灵余量检测: {course_name}, remain={remain}, isFull=True"
+                        )
+                        state['last_status'] = 'ghost_capacity'
+                else:
+                    # 正常的已满状态
+                    if last_remain > 0 or (last_remain == -999 and state.get('last_status') != 'full'):
+                        state['last_status'] = 'full'
+                
+                state['last_remain'] = remain
+                time.sleep(1.0)
+                continue
+            
+            # ========== 安全策略 3: 行动条件 - isFull=False 且 remain>0 ==========
             if remain > 0:
+                # 通过安全检查！可以进入抢课流程
                 if last_remain <= 0 or state.get('last_status') != 'available':
-                    self.status.emit(f"[ALERT] 🎉 {course_name} 发现余量！余={remain}/{capacity}")
+                    self.status.emit(
+                        f"[ALERT] 🎉 {course_name} 发现余量！余={remain}/{capacity} "
+                        f"(isFull=False, 安全)"
+                    )
                     self.course_available.emit(course_name, teacher, remain, capacity)
                     state['last_status'] = 'available'
                     
@@ -1506,7 +1583,7 @@ class MultiGrabWorker(QThread):
                         self._remove_course_safe(tc_id)
                         break
                     else:
-                        self.status.emit(f"[WARN] 选课返回成功但核实失败，重试...")
+                        self.status.emit(f"[WARN] 选课返回成功但核实失败，继续监控...")
                 
                 elif msg == "session_expired":
                     self.need_relogin.emit()
