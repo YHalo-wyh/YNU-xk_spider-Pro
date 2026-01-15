@@ -1091,7 +1091,7 @@ class MainWindow(QMainWindow):
         """显示关于对话框"""
         dialog = QDialog(self)
         dialog.setWindowTitle("关于 YNU选课助手 Pro")
-        dialog.setFixedSize(450, 420)
+        dialog.setFixedSize(500, 550)
         dialog.setStyleSheet(f"""
             QDialog {{
                 background-color: {Colors.BASE};
@@ -1102,7 +1102,7 @@ class MainWindow(QMainWindow):
         """)
         
         layout = QVBoxLayout(dialog)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
         layout.setContentsMargins(30, 25, 30, 20)
         
         # Logo/标题
@@ -1122,7 +1122,7 @@ class MainWindow(QMainWindow):
         version_label.setStyleSheet(f"""
             font-size: 14px;
             color: {Colors.SUBTEXT0};
-            margin-bottom: 8px;
+            margin-bottom: 6px;
         """)
         layout.addWidget(version_label)
         
@@ -1132,25 +1132,67 @@ class MainWindow(QMainWindow):
         line.setStyleSheet(f"background-color: {Colors.SURFACE2}; max-height: 1px;")
         layout.addWidget(line)
         
-        # 功能描述
-        features_label = QLabel(
-            "☁️ 云南大学教务系统选课辅助工具\n\n"
-            "✨ 主要功能:\n"
-            "　• 纯 API 模式，无需浏览器\n"
-            "　• 自动 OCR 验证码识别\n"
-            "　• 多课程并发监控抢课\n"
-            "　• 智能换课（自动退旧选新）\n"
-            "　• Server酱微信通知推送\n"
-            "　• Session 过期自动重登"
-        )
-        features_label.setAlignment(Qt.AlignLeft)
-        features_label.setStyleSheet(f"""
+        # 简介
+        intro_label = QLabel("☁️ 云南大学教务系统选课辅助工具")
+        intro_label.setAlignment(Qt.AlignCenter)
+        intro_label.setStyleSheet(f"""
             font-size: 13px;
             color: {Colors.SUBTEXT1};
-            line-height: 1.6;
-            padding: 8px 4px;
+            padding: 4px 0;
         """)
-        layout.addWidget(features_label)
+        layout.addWidget(intro_label)
+        
+        # 功能描述（使用滚动区域）
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet(f"""
+            QScrollArea {{
+                border: none;
+                background-color: transparent;
+            }}
+        """)
+        
+        features_widget = QWidget()
+        features_layout = QVBoxLayout(features_widget)
+        features_layout.setSpacing(8)
+        features_layout.setContentsMargins(4, 4, 4, 4)
+        
+        # 主要功能
+        features_text = QLabel(
+            "✨ <b>主要功能</b><br>"
+            "　• 纯 API 模式，无需浏览器<br>"
+            "　• 自动 OCR 验证码识别<br>"
+            "　• 多课程并发监控抢课<br>"
+            "　• 智能换课（自动退旧选新）<br>"
+            "　• Server酱微信通知推送<br>"
+            "　• Session 过期自动重登<br><br>"
+            
+            "📖 <b>使用方法</b><br>"
+            "1. 输入学号密码，点击「一键登录」<br>"
+            "2. 选择课程类型，浏览或搜索课程<br>"
+            "3. 点击「加入待抢」添加到列表<br>"
+            "4. 设置并发数，点击「开始监控」<br><br>"
+            
+            "📱 <b>Server酱配置</b><br>"
+            "1. 访问 <a href='https://sct.ftqq.com/' style='color: #89b4fa;'>https://sct.ftqq.com/</a><br>"
+            "2. 微信扫码登录获取 SendKey<br>"
+            "3. 勾选「微信通知」并填入 SendKey<br>"
+            "4. 发现余量和抢课成功时自动推送"
+        )
+        features_text.setWordWrap(True)
+        features_text.setOpenExternalLinks(True)
+        features_text.setTextFormat(Qt.RichText)
+        features_text.setStyleSheet(f"""
+            font-size: 12px;
+            color: {Colors.SUBTEXT1};
+            line-height: 1.5;
+            padding: 6px;
+        """)
+        features_layout.addWidget(features_text)
+        
+        scroll.setWidget(features_widget)
+        scroll.setFixedHeight(260)
+        layout.addWidget(scroll)
         
         layout.addStretch()
         
@@ -1164,14 +1206,14 @@ class MainWindow(QMainWindow):
         """)
         author_layout = QVBoxLayout(author_frame)
         author_layout.setSpacing(4)
-        author_layout.setContentsMargins(16, 12, 16, 12)
+        author_layout.setContentsMargins(16, 10, 16, 10)
         
         original_label = QLabel("🔗 原项目: starwingChen/YNU-xk_spider")
-        original_label.setStyleSheet(f"font-size: 12px; color: {Colors.OVERLAY0};")
+        original_label.setStyleSheet(f"font-size: 11px; color: {Colors.OVERLAY0};")
         author_layout.addWidget(original_label)
         
         dev_label = QLabel("👨‍💻 当前维护: YHalo-wyh")
-        dev_label.setStyleSheet(f"font-size: 13px; color: {Colors.LAVENDER}; font-weight: bold;")
+        dev_label.setStyleSheet(f"font-size: 12px; color: {Colors.LAVENDER}; font-weight: bold;")
         author_layout.addWidget(dev_label)
         
         layout.addWidget(author_frame)
@@ -1182,7 +1224,7 @@ class MainWindow(QMainWindow):
         
         github_btn = QPushButton("⭐ GitHub 仓库")
         github_btn.setCursor(Qt.PointingHandCursor)
-        github_btn.setFixedHeight(38)
+        github_btn.setFixedHeight(36)
         github_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {Colors.SURFACE1};
@@ -1203,7 +1245,7 @@ class MainWindow(QMainWindow):
         
         close_btn = QPushButton("关闭")
         close_btn.setCursor(Qt.PointingHandCursor)
-        close_btn.setFixedHeight(38)
+        close_btn.setFixedHeight(36)
         close_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {Colors.SURFACE2};

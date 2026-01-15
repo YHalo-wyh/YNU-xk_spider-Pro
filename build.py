@@ -1,5 +1,4 @@
 """
-YNU选课助手 Pro - 打包脚本
 打包为独立exe + 创建安装包
 """
 import os
@@ -36,7 +35,7 @@ def build_exe():
     
     # PyInstaller 参数 - 打包所有依赖
     args = [
-        "main.py",
+        "run_gui.py",
         "--name=YNU选课助手Pro",
         "--onedir",            # 打包到一个目录（比onefile快且稳定）
         "--windowed",          # 无控制台
@@ -44,17 +43,13 @@ def build_exe():
         "--clean",
         # 数据文件
         "--add-data=xk_spider;xk_spider",
-        "--add-data=chromedriver-win64;chromedriver-win64",
         # 收集所有依赖
         "--collect-all=ddddocr",
         "--collect-all=onnxruntime",
-        "--collect-all=webdriver_manager",
         "--collect-all=certifi",
         # 隐藏导入
         "--hidden-import=PyQt5.sip",
         "--hidden-import=PIL._tkinter_finder",
-        "--hidden-import=webdriver_manager",
-        "--hidden-import=webdriver_manager.chrome",
         "--hidden-import=certifi",
     ]
     
