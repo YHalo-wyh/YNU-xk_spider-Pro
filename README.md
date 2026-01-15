@@ -3,6 +3,7 @@
 > Forked from [starwingChen/YNU-xk_spider](https://github.com/starwingChen/YNU-xk_spider)
 
 云南大学选课辅助工具，支持课程监控、自动抢课、智能换课、微信推送等功能。
+目前对代码进行了重构，使用api发包模式和提供了可视化ui便于操作。
 
 ## ✨ 功能特性
 
@@ -77,8 +78,6 @@ pip install -r requirements.txt
 python run_gui.py
 ```
 
-
-需要安装 [NSIS](https://nsis.sourceforge.io/) 用于生成安装包。
 
 ## ⚠️ 免责声明
 
