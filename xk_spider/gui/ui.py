@@ -546,7 +546,7 @@ class MainWindow(QMainWindow):
     """主窗口 - Modern Dark Dashboard"""
     
     # 版本信息
-    VERSION = "2.0.0"
+    VERSION = "1.2.0"
     GITHUB_URL = "https://github.com/YHalo-wyh/YNU-xk_spider"
     
     def __init__(self):
@@ -1212,7 +1212,7 @@ class MainWindow(QMainWindow):
         original_label.setStyleSheet(f"font-size: 11px; color: {Colors.OVERLAY0};")
         author_layout.addWidget(original_label)
         
-        dev_label = QLabel("👨‍💻 当前维护: YHalo-wyh")
+        dev_label = QLabel("👨‍💻 作者: YHalo-wyh")
         dev_label.setStyleSheet(f"font-size: 12px; color: {Colors.LAVENDER}; font-weight: bold;")
         author_layout.addWidget(dev_label)
         
