@@ -14,13 +14,14 @@
 - 🎲 **盲抢机制** - 查询失败时自动尝试盲抢
 - 📱 **微信推送** - 余课提醒 + 抢课成功通知（Server酱）
 - 🔁 **Session 自动恢复** - 登录过期自动重登，监控不中断
-- 🎨 **现代化ui界面** - Catppuccin Mocha 暗色主题
+- 🎨 **现代化界面** - Catppuccin Mocha 暗色主题
+- 🔔 **应用内检查更新** - 自动检测新版本
 
 ## 🚀 快速开始
 
 ### 下载安装
 
-从 [Releases](https://github.com/YHalo-wyh/YNU-xk_spider/releases) 下载最新版本：
+从 [Releases](https://github.com/YHalo-wyh/YNU-xk_spider-Pro/releases) 下载最新版本：
 - `YNU选课助手Pro_Setup.exe` - 安装版（推荐）
 
 ### 使用说明
@@ -62,8 +63,8 @@
 
 ```bash
 # 克隆仓库
-git clone https://github.com/YHalo-wyh/YNU-xk_spider.git
-cd YNU-xk_spider
+git clone https://github.com/YHalo-wyh/YNU-xk_spider-Pro.git
+cd YNU-xk_spider-Pro
 
 # 创建虚拟环境
 python -m venv .venv
@@ -97,12 +98,14 @@ python build.py
 ## 📝 更新日志
 
 ### v1.2.0 (2026.01.16)
-- ✨全新纯检 API 架构，无需浏览器
+- 🚀 全新纯 API 架构，无需浏览器
 - 🎨 Catppuccin Mocha 暗色主题
 - ⚡ 多课程并发监控（独立线程）
 - 🔄 智能换课功能（自动退旧选新）
 - 🎲 盲抢机制
+- 📱 Server酱微信通知集成
 - 🔁 Session 过期自动重登
+- 🔔 应用内检查更新功能
 - 📋 帮助菜单与关于对话框
 
 ### v1.0.0-beta (2026.01.12)

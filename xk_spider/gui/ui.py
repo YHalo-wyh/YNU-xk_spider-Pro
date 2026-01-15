@@ -547,7 +547,7 @@ class MainWindow(QMainWindow):
     
     # 版本信息
     VERSION = "1.2.0"
-    GITHUB_URL = "https://github.com/YHalo-wyh/YNU-xk_spider"
+    GITHUB_URL = "https://github.com/YHalo-wyh/YNU-xk_spider-Pro"
     
     def __init__(self):
         super().__init__()
@@ -805,6 +805,22 @@ class MainWindow(QMainWindow):
         
         self.search_btn = QPushButton("搜索")
         self.search_btn.setFixedSize(70, 42)
+        self.search_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.BLUE};
+                color: {Colors.CRUST};
+                border: none;
+                border-radius: 8px;
+                font-weight: bold;
+                font-size: 13px;
+            }}
+            QPushButton:hover {{
+                background-color: {Colors.LAVENDER};
+            }}
+            QPushButton:pressed {{
+                background-color: {Colors.SAPPHIRE};
+            }}
+        """)
         self.search_btn.clicked.connect(self.on_search)
         search_layout.addWidget(self.search_btn)
         left_layout.addLayout(search_layout)
@@ -1021,12 +1037,29 @@ class MainWindow(QMainWindow):
     
     def _check_update(self):
         """检查更新 - 从 GitHub API 获取最新版本"""
+        # 显示检查中的提示
+        checking_msg = QMessageBox(self)
+        checking_msg.setWindowTitle("检查更新")
+        checking_msg.setText("正在检查更新，请稍候...")
+        checking_msg.setStandardButtons(QMessageBox.NoButton)
+        checking_msg.setStyleSheet(f"""
+            QMessageBox {{
+                background-color: {Colors.BASE};
+            }}
+            QMessageBox QLabel {{
+                color: {Colors.TEXT};
+                font-size: 14px;
+            }}
+        """)
+        checking_msg.show()
+        QApplication.processEvents()
+        
         self.statusBar().showMessage("正在检查更新...")
         
         def _fetch_latest():
             try:
                 # GitHub API 获取最新 release
-                api_url = "https://api.github.com/repos/YHalo-wyh/YNU-xk_spider/releases/latest"
+                api_url = "https://api.github.com/repos/YHalo-wyh/YNU-xk_spider-Pro/releases/latest"
                 resp = requests.get(api_url, timeout=(5, 10))
                 if resp.status_code == 200:
                     data = resp.json()
@@ -1045,13 +1078,14 @@ class MainWindow(QMainWindow):
         def _check():
             latest_version, release_url, release_notes, error = _fetch_latest()
             # 使用 QTimer 回到主线程更新 UI
-            QTimer.singleShot(0, lambda: self._on_update_checked(latest_version, release_url, release_notes, error))
+            QTimer.singleShot(0, lambda: self._on_update_checked(latest_version, release_url, release_notes, error, checking_msg))
         
         thread = threading.Thread(target=_check, daemon=True)
         thread.start()
     
-    def _on_update_checked(self, latest_version, release_url, release_notes, error):
+    def _on_update_checked(self, latest_version, release_url, release_notes, error, checking_msg):
         """更新检查完成回调"""
+        checking_msg.close()
         self.statusBar().showMessage("", 0)
         
         if error:
