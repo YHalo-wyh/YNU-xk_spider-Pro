@@ -1596,11 +1596,15 @@ class MainWindow(QMainWindow):
                 self.log(f"[API] 获取失败: {error}")
                 self.course_count_label.setText("获取失败")
             
-            # 只有在非静默模式下才处理登录过期
+            # 只有在非监控模式下才处理登录过期（监控时由 worker 自动重登）
             if '登录' in error_str or 'token' in error_str:
-                self.poll_timer.stop()
-                self.logout()
-                QMessageBox.warning(self, "会话过期", "登录已过期，请重新登录")
+                if self.multi_grab_worker and self.multi_grab_worker.isRunning():
+                    # 监控中，忽略这个错误，等待 worker 重登
+                    self.log("[API] 监控中检测到 session 问题，等待自动重登...")
+                else:
+                    self.poll_timer.stop()
+                    self.logout()
+                    QMessageBox.warning(self, "会话过期", "登录已过期，请重新登录")
             return
         
         # 成功获取，重置重试计数器

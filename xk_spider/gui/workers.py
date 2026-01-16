@@ -366,7 +366,7 @@ class MultiGrabWorker(QThread):
         self._request_count = 0
         self._request_count_lock = threading.Lock()
         self._last_heartbeat_time = time.time()
-        self._last_login_check_time = time.time()  # 上次登录状态检测时间
+        self._last_login_check_time = 0  # 初始化为0，启动后立即检测一次
         
         # 初始化 HTTP Session（大连接池）
         self.http_session = requests.Session()
@@ -468,51 +468,58 @@ class MultiGrabWorker(QThread):
         return cookie_dict
     
     def _check_login_status(self):
-        """检测登录状态"""
+        """检测登录状态 - 使用已选课程接口"""
+        self.status.emit("[登录] 正在检测登录状态...")
         try:
-            # 使用一个轻量级 API 检测登录状态
-            url = f"{BASE_URL}/elective/courseList.do"
-            query_param = {
-                "data": {
-                    "studentCode": self.student_code,
-                    "electiveBatchCode": self.batch_code,
-                },
-                "pageSize": "1",
-                "pageNumber": "0",
-                "order": ""
+            # 使用已选课程接口检测登录状态
+            timestamp = str(int(time.time() * 1000))
+            url = f"{BASE_URL}/elective/courseResult.do"
+            
+            params = {
+                "timestamp": timestamp,
+                "studentCode": self.student_code,
+                "electiveBatchCode": self.batch_code,
             }
             
-            resp = self.http_session.post(
+            resp = self.http_session.get(
                 url,
                 headers=self._get_headers(),
                 cookies=self._parse_cookies(self.cookies),
-                data={"querySetting": json.dumps(query_param, ensure_ascii=False)},
-                timeout=(3, 5),
+                params=params,
+                timeout=(5, 10),
                 verify=False,
                 allow_redirects=False
             )
             
-            # 检查是否过期
-            if resp.status_code == 302 or self._is_session_expired(response=resp):
+            # 检查 302 跳转（Session 过期）
+            if resp.status_code == 302:
                 self.login_status.emit(False, "Session 已过期")
-                self.status.emit("[登录] ⚠️ Session 已过期，正在尝试重登...")
+                self.status.emit("[登录] ⚠️ Session 已过期，需要重新登录")
+                self._handle_session_expired()
                 return
             
             if resp.status_code == 200:
                 result = resp.json()
+                # 检查响应内容是否表示过期
                 if self._is_session_expired(result=result):
                     self.login_status.emit(False, "Session 已过期")
-                    self.status.emit("[登录] ⚠️ Session 已过期，正在尝试重登...")
+                    self.status.emit("[登录] ⚠️ Session 已过期，需要重新登录")
+                    self._handle_session_expired()
                 else:
                     self.login_status.emit(True, "在线")
                     self.status.emit("[登录] ✅ 登录状态正常")
             else:
+                # 非 200 状态码，可能是服务器问题或登录过期
                 self.login_status.emit(False, f"HTTP {resp.status_code}")
+                self.status.emit(f"[登录] ⚠️ 异常状态 HTTP {resp.status_code}，尝试重登...")
+                self._handle_session_expired()
                 
         except requests.exceptions.Timeout:
             self.login_status.emit(False, "网络超时")
+            self.status.emit("[登录] ⚠️ 网络超时，稍后重试")
         except Exception as e:
-            self.login_status.emit(False, f"检测失败: {str(e)[:20]}")
+            self.login_status.emit(False, f"检测失败")
+            self.status.emit(f"[登录] ❌ 检测异常: {str(e)[:50]}")
     
     def _get_headers(self):
         """获取请求头"""
