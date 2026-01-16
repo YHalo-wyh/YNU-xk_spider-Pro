@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-快速启动脚本
+YNU选课助手 Pro - 启动入口
 运行: python run_gui.py
 """
 from xk_spider.gui import main
