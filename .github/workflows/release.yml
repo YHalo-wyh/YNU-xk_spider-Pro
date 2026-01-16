@@ -1,0 +1,113 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build EXE with PyInstaller
+        shell: pwsh
+        run: |
+          pyinstaller run_gui.py `
+            --name="YNU选课助手Pro" `
+            --onedir `
+            --windowed `
+            --noconfirm `
+            --clean `
+            --add-data="xk_spider;xk_spider" `
+            --collect-all=ddddocr `
+            --collect-all=onnxruntime `
+            --collect-all=certifi `
+            --hidden-import=PyQt5.sip `
+            --hidden-import=PIL._tkinter_finder `
+            --hidden-import=certifi
+
+      - name: Create Portable ZIP
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist\YNU选课助手Pro" -DestinationPath "dist\YNU选课助手Pro_Portable.zip" -Force
+
+      - name: Install NSIS
+        shell: pwsh
+        run: |
+          choco install nsis -y
+
+      - name: Create NSIS installer script
+        shell: pwsh
+        run: |
+          @"
+          !include "MUI2.nsh"
+          
+          Name "YNU选课助手 Pro"
+          OutFile "dist\YNU选课助手Pro_Setup.exe"
+          InstallDir "`$PROGRAMFILES\YNU选课助手Pro"
+          RequestExecutionLevel admin
+          
+          !insertmacro MUI_PAGE_WELCOME
+          !insertmacro MUI_PAGE_DIRECTORY
+          !insertmacro MUI_PAGE_INSTFILES
+          !insertmacro MUI_PAGE_FINISH
+          
+          !insertmacro MUI_UNPAGE_CONFIRM
+          !insertmacro MUI_UNPAGE_INSTFILES
+          
+          !insertmacro MUI_LANGUAGE "SimpChinese"
+          
+          Section "Install"
+              SetOutPath "`$INSTDIR"
+              File /r "dist\YNU选课助手Pro\*.*"
+              CreateDirectory "`$SMPROGRAMS\YNU选课助手Pro"
+              CreateShortcut "`$SMPROGRAMS\YNU选课助手Pro\YNU选课助手Pro.lnk" "`$INSTDIR\YNU选课助手Pro.exe"
+              CreateShortcut "`$DESKTOP\YNU选课助手Pro.lnk" "`$INSTDIR\YNU选课助手Pro.exe"
+              WriteUninstaller "`$INSTDIR\Uninstall.exe"
+          SectionEnd
+          
+          Section "Uninstall"
+              RMDir /r "`$INSTDIR"
+              RMDir /r "`$SMPROGRAMS\YNU选课助手Pro"
+              Delete "`$DESKTOP\YNU选课助手Pro.lnk"
+          SectionEnd
+          "@ | Out-File -FilePath "installer.nsi" -Encoding UTF8
+
+      - name: Build NSIS installer
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\NSIS\makensis.exe" installer.nsi
+
+      - name: Verify outputs
+        shell: pwsh
+        run: |
+          Get-ChildItem dist
+          if (!(Test-Path "dist\YNU选课助手Pro_Portable.zip")) { throw "Missing Portable.zip" }
+          if (!(Test-Path "dist\YNU选课助手Pro_Setup.exe")) { throw "Missing Setup.exe" }
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/YNU选课助手Pro_Portable.zip
+            dist/YNU选课助手Pro_Setup.exe
