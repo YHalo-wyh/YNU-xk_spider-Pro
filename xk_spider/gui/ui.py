@@ -11,7 +11,8 @@ from PyQt5.QtWidgets import (
     QPushButton, QLabel, QLineEdit, QComboBox, QListWidget, QListWidgetItem,
     QTextEdit, QProgressBar, QMessageBox, QFrame, QGridLayout, QSizePolicy,
     QSpinBox, QScrollArea, QCheckBox, QSplitter, QApplication, QMenu,
-    QGraphicsDropShadowEffect, QMenuBar, QAction, QDialog, QDialogButtonBox
+    QGraphicsDropShadowEffect, QMenuBar, QAction, QDialog, QDialogButtonBox,
+    QProgressDialog
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, pyqtProperty, QUrl
 from PyQt5.QtGui import QFont, QPainter, QColor, QTextCursor, QDesktopServices
@@ -1037,18 +1038,31 @@ class MainWindow(QMainWindow):
     
     def _check_update(self):
         """检查更新 - 从 GitHub API 获取最新版本"""
-        # 显示检查中的提示
-        checking_msg = QMessageBox(self)
+        # 显示检查中的提示（使用 QProgressDialog 可以取消）
+        checking_msg = QProgressDialog("正在检查更新，请稍候...", "取消", 0, 0, self)
         checking_msg.setWindowTitle("检查更新")
-        checking_msg.setText("正在检查更新，请稍候...")
-        checking_msg.setStandardButtons(QMessageBox.NoButton)
+        checking_msg.setWindowModality(Qt.WindowModal)
+        checking_msg.setMinimumDuration(0)
+        checking_msg.setAutoClose(True)
+        checking_msg.setAutoReset(True)
         checking_msg.setStyleSheet(f"""
-            QMessageBox {{
+            QProgressDialog {{
                 background-color: {Colors.BASE};
             }}
-            QMessageBox QLabel {{
+            QLabel {{
                 color: {Colors.TEXT};
                 font-size: 14px;
+            }}
+            QPushButton {{
+                background-color: {Colors.SURFACE0};
+                color: {Colors.TEXT};
+                border: 1px solid {Colors.SURFACE2};
+                border-radius: 6px;
+                padding: 6px 16px;
+                font-size: 13px;
+            }}
+            QPushButton:hover {{
+                background-color: {Colors.SURFACE1};
             }}
         """)
         checking_msg.show()
@@ -1076,7 +1090,18 @@ class MainWindow(QMainWindow):
         
         import threading
         def _check():
+            # 检查是否被取消
+            if checking_msg.wasCanceled():
+                QTimer.singleShot(0, lambda: self.statusBar().showMessage("", 0))
+                return
+            
             latest_version, release_url, release_notes, error = _fetch_latest()
+            
+            # 检查是否被取消
+            if checking_msg.wasCanceled():
+                QTimer.singleShot(0, lambda: self.statusBar().showMessage("", 0))
+                return
+            
             # 使用 QTimer 回到主线程更新 UI
             QTimer.singleShot(0, lambda: self._on_update_checked(latest_version, release_url, release_notes, error, checking_msg))
         
