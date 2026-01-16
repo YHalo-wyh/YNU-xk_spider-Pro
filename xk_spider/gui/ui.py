@@ -1042,6 +1042,8 @@ class MainWindow(QMainWindow):
         checking_msg = QProgressDialog("正在检查更新，请稍候...", "取消", 0, 0, self)
         checking_msg.setWindowTitle("检查更新")
         checking_msg.setWindowModality(Qt.WindowModal)
+        checking_msg.setMinimumWidth(350)
+        checking_msg.setMinimumHeight(100)
         checking_msg.setMinimumDuration(0)
         checking_msg.setAutoClose(True)
         checking_msg.setAutoReset(True)
