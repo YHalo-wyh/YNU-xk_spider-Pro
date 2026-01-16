@@ -19,10 +19,8 @@ from PyQt5.QtGui import QFont, QPainter, QColor, QTextCursor, QDesktopServices
 
 from .config import COURSE_TYPES, COURSE_NAME_TO_TYPE, parse_int
 from .utils import OCR_AVAILABLE
-from .workers import LoginWorker, MultiGrabWorker, CourseFetchWorker
+from .workers import LoginWorker, MultiGrabWorker, CourseFetchWorker, UpdateCheckWorker
 from .logger import get_logger
-
-import requests  # 用于检查更新
 
 
 # ========== Catppuccin Mocha 配色方案 ==========
@@ -547,7 +545,7 @@ class MainWindow(QMainWindow):
     """主窗口 - Modern Dark Dashboard"""
     
     # 版本信息
-    VERSION = "1.3.0"
+    VERSION = "1.4.0"
     GITHUB_URL = "https://github.com/YHalo-wyh/YNU-xk_spider-Pro"
     
     def __init__(self):
@@ -1037,17 +1035,16 @@ class MainWindow(QMainWindow):
         QDesktopServices.openUrl(QUrl(self.GITHUB_URL))
     
     def _check_update(self):
-        """检查更新 - 从 GitHub API 获取最新版本"""
-        # 显示检查中的提示（使用 QProgressDialog 可以取消）
-        checking_msg = QProgressDialog("正在检查更新，请稍候...", "取消", 0, 0, self)
-        checking_msg.setWindowTitle("检查更新")
-        checking_msg.setWindowModality(Qt.WindowModal)
-        checking_msg.setMinimumWidth(350)
-        checking_msg.setMinimumHeight(100)
-        checking_msg.setMinimumDuration(0)
-        checking_msg.setAutoClose(True)
-        checking_msg.setAutoReset(True)
-        checking_msg.setStyleSheet(f"""
+        """检查更新 - 使用 UpdateCheckWorker"""
+        # 显示检查中的提示
+        self._update_check_dialog = QProgressDialog("正在检查更新，请稍候...", "取消", 0, 0, self)
+        self._update_check_dialog.setWindowTitle("检查更新")
+        self._update_check_dialog.setWindowModality(Qt.WindowModal)
+        self._update_check_dialog.setMinimumWidth(350)
+        self._update_check_dialog.setMinimumHeight(100)
+        self._update_check_dialog.setMinimumDuration(0)
+        self._update_check_dialog.setAutoClose(False)
+        self._update_check_dialog.setStyleSheet(f"""
             QProgressDialog {{
                 background-color: {Colors.BASE};
             }}
@@ -1067,52 +1064,30 @@ class MainWindow(QMainWindow):
                 background-color: {Colors.SURFACE1};
             }}
         """)
-        checking_msg.show()
-        QApplication.processEvents()
+        self._update_check_dialog.canceled.connect(self._on_update_check_canceled)
+        self._update_check_dialog.show()
         
         self.statusBar().showMessage("正在检查更新...")
         
-        def _fetch_latest():
-            try:
-                # GitHub API 获取最新 release
-                api_url = "https://api.github.com/repos/YHalo-wyh/YNU-xk_spider-Pro/releases/latest"
-                resp = requests.get(api_url, timeout=(5, 10))
-                if resp.status_code == 200:
-                    data = resp.json()
-                    latest_version = data.get('tag_name', '').lstrip('v')
-                    release_url = data.get('html_url', self.GITHUB_URL)
-                    release_notes = data.get('body', '')[:500]
-                    return latest_version, release_url, release_notes, None
-                elif resp.status_code == 404:
-                    return None, None, None, "暂无发布版本"
-                else:
-                    return None, None, None, f"请求失败: HTTP {resp.status_code}"
-            except Exception as e:
-                return None, None, None, f"网络错误: {str(e)[:50]}"
-        
-        import threading
-        def _check():
-            # 检查是否被取消
-            if checking_msg.wasCanceled():
-                QTimer.singleShot(0, lambda: self.statusBar().showMessage("", 0))
-                return
-            
-            latest_version, release_url, release_notes, error = _fetch_latest()
-            
-            # 检查是否被取消
-            if checking_msg.wasCanceled():
-                QTimer.singleShot(0, lambda: self.statusBar().showMessage("", 0))
-                return
-            
-            # 使用 QTimer 回到主线程更新 UI
-            QTimer.singleShot(0, lambda: self._on_update_checked(latest_version, release_url, release_notes, error, checking_msg))
-        
-        thread = threading.Thread(target=_check, daemon=True)
-        thread.start()
+        # 启动后台 Worker
+        self._update_check_worker = UpdateCheckWorker(self.VERSION)
+        self._update_check_worker.finished.connect(self._on_update_checked)
+        self._update_check_worker.start()
     
-    def _on_update_checked(self, latest_version, release_url, release_notes, error, checking_msg):
+    def _on_update_check_canceled(self):
+        """用户取消检查更新"""
+        if hasattr(self, '_update_check_worker') and self._update_check_worker:
+            try:
+                self._update_check_worker.finished.disconnect()
+            except TypeError:
+                pass
+        self.statusBar().showMessage("", 0)
+    
+    def _on_update_checked(self, has_update, latest_version, download_url, error):
         """更新检查完成回调"""
-        checking_msg.close()
+        # 关闭进度对话框
+        if hasattr(self, '_update_check_dialog') and self._update_check_dialog:
+            self._update_check_dialog.close()
         self.statusBar().showMessage("", 0)
         
         if error:
@@ -1123,30 +1098,17 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "检查更新", "暂无发布版本信息")
             return
         
-        current = self.VERSION
-        # 简单版本比较
-        def version_tuple(v):
-            return tuple(map(int, (v.split('.'))))
-        
-        try:
-            is_new = version_tuple(latest_version) > version_tuple(current)
-        except:
-            is_new = latest_version != current
-        
-        if is_new:
-            msg = f"发现新版本！\n\n当前版本: v{current}\n最新版本: v{latest_version}"
-            if release_notes:
-                msg += f"\n\n更新说明:\n{release_notes[:300]}..."
-            
+        if has_update:
+            msg = f"发现新版本！\n\n当前版本: v{self.VERSION}\n最新版本: v{latest_version}"
             reply = QMessageBox.question(
                 self, "发现新版本", 
                 msg + "\n\n是否前往下载？",
                 QMessageBox.Yes | QMessageBox.No
             )
             if reply == QMessageBox.Yes:
-                QDesktopServices.openUrl(QUrl(release_url))
+                QDesktopServices.openUrl(QUrl(download_url))
         else:
-            QMessageBox.information(self, "检查更新", f"当前已是最新版本 v{current}")
+            QMessageBox.information(self, "检查更新", f"当前已是最新版本 v{self.VERSION}")
     
     def _show_about_dialog(self):
         """显示关于对话框"""
@@ -1337,50 +1299,40 @@ class MainWindow(QMainWindow):
     def log(self, msg):
         """
         日志方法：UI 滚动清理 + 文件持久化
+        优化：减少 UI 操作频率，避免长时间运行后卡顿
         """
         # 写入文件日志
         self._logger.info(msg)
         
-        # UI 滚动窗口机制：超过 1000 行时删除最旧的 100 行
-        doc = self.log_text.document()
-        if doc.blockCount() > 1000:
-            cursor = QTextCursor(doc)
-            cursor.movePosition(QTextCursor.Start)
-            for _ in range(100):
-                cursor.movePosition(QTextCursor.Down, QTextCursor.KeepAnchor)
-            cursor.removeSelectedText()
-            cursor.deleteChar()  # 删除多余的换行
+        # 计数器：每 50 条日志才检查一次是否需要清理
+        if not hasattr(self, '_log_count'):
+            self._log_count = 0
+        self._log_count += 1
+        
+        # 每 50 条检查一次，超过 500 行时清空到 200 行
+        if self._log_count % 50 == 0:
+            doc = self.log_text.document()
+            block_count = doc.blockCount()
+            if block_count > 500:
+                # 直接截取最后 200 行，比逐行删除快得多
+                text = self.log_text.toPlainText()
+                lines = text.split('\n')
+                if len(lines) > 200:
+                    self.log_text.setPlainText('\n'.join(lines[-200:]))
         
         # 追加新日志
         self.log_text.append(f"[{time.strftime('%H:%M:%S')}] {msg}")
         
-        # 自动滚动到底部
-        scrollbar = self.log_text.verticalScrollBar()
-        scrollbar.setValue(scrollbar.maximum())
+        # 每 10 条才滚动一次，减少 UI 刷新
+        if self._log_count % 10 == 0:
+            scrollbar = self.log_text.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
     
     def update_heartbeat(self, count):
-        """更新心跳指示器 - 胶囊状带呼吸效果"""
+        """更新心跳指示器 - 只更新文本，避免频繁设置样式"""
         self._heartbeat_count = count
-        # 呼吸效果：奇偶切换图标和背景色
-        if count % 2 == 0:
-            icon = "⚡"
-            bg_color = Colors.SURFACE0
-        else:
-            icon = "✨"
-            bg_color = Colors.SURFACE1
-        
-        self.run_indicator.setText(f"{icon} 监控中 | 已扫描: {count} 次")
-        self.run_indicator.setStyleSheet(f"""
-            QLabel {{
-                color: {Colors.GREEN};
-                background-color: {bg_color};
-                font-size: 13px;
-                font-weight: bold;
-                padding: 6px 16px;
-                border-radius: 14px;
-                margin: 2px 8px;
-            }}
-        """)
+        # 只更新文本，不频繁切换样式（避免内存泄漏和卡顿）
+        self.run_indicator.setText(f"⚡ 监控中 | 已扫描: {count} 次")
     
     def load_config(self):
         try:
@@ -1498,7 +1450,7 @@ class MainWindow(QMainWindow):
     def refresh_courses(self, keyword='', silent=False, force=False):
         """
         刷新课程列表（使用后台线程）
-        force=True 时强制终止当前请求并启动新请求
+        force=True 时断开旧请求信号并启动新请求
         """
         if not self.is_logged_in:
             if not silent:
@@ -1508,11 +1460,13 @@ class MainWindow(QMainWindow):
         # 如果有正在运行的请求
         if self._course_fetch_worker and self._course_fetch_worker.isRunning():
             if force:
-                # 强制终止旧请求
-                self._course_fetch_worker.finished.disconnect()
-                self._course_fetch_worker.terminate()
-                self._course_fetch_worker.wait(500)
-                self._course_fetch_worker = None
+                # 断开旧请求的信号连接，让它自然结束（不使用 terminate 避免资源泄漏）
+                try:
+                    self._course_fetch_worker.finished.disconnect()
+                except TypeError:
+                    pass  # 信号未连接，忽略
+                self.log("[API] 后台有未完成请求，已断开信号并重新发起")
+                # 不再等待旧线程，让它自然结束
             else:
                 # 非强制模式，跳过
                 return
@@ -1561,6 +1515,11 @@ class MainWindow(QMainWindow):
         if error:
             error_str = str(error).lower()
             
+            # 初始化失败计数器
+            if not hasattr(self, '_fetch_fail_count'):
+                self._fetch_fail_count = 0
+            self._fetch_fail_count += 1
+            
             # 网络连接错误 - 自动重试
             is_network_error = any(kw in error_str for kw in [
                 'connectionpool', 'connection', 'timeout', 'timed out',
@@ -1576,20 +1535,28 @@ class MainWindow(QMainWindow):
                 max_retries = 3
                 
                 if self._fetch_retry_count <= max_retries:
-                    self.log(f"[API] 网络错误，{self._fetch_retry_count}s 后自动重试 ({self._fetch_retry_count}/{max_retries})")
-                    self.course_count_label.setText(f"重试中 ({self._fetch_retry_count}/{max_retries})...")
+                    # 3次内都显示"加载中"，不显示失败
+                    if not silent:
+                        self.course_count_label.setText("加载中...")
                     # 延迟重试，间隔递增
                     QTimer.singleShot(self._fetch_retry_count * 1000, lambda: self.refresh_courses(silent=silent, force=True))
                     return
                 else:
-                    # 超过重试次数
+                    # 超过重试次数才显示失败
                     self._fetch_retry_count = 0
                     if not silent:
                         self.log(f"[API] 获取失败: {error}")
-                        self.course_count_label.setText("获取失败 (点击刷新)")
+                        self.course_count_label.setText("获取失败 (等待下次轮询)")
                     return
             
-            # 重置重试计数器（非网络错误）
+            # 非网络错误：也要累计3次才显示失败
+            if self._fetch_fail_count < 3:
+                if not silent:
+                    self.course_count_label.setText("加载中...")
+                return
+            
+            # 重置计数器
+            self._fetch_fail_count = 0
             self._fetch_retry_count = 0
             
             if not silent:
@@ -1607,8 +1574,9 @@ class MainWindow(QMainWindow):
                     QMessageBox.warning(self, "会话过期", "登录已过期，请重新登录")
             return
         
-        # 成功获取，重置重试计数器
+        # 成功获取，重置计数器
         self._fetch_retry_count = 0
+        self._fetch_fail_count = 0
         
         if courses_grouped:
             self._api_courses_grouped = courses_grouped

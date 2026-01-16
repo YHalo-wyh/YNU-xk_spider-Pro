@@ -50,6 +50,55 @@ def parse_int_field(value, default=0):
     return default
 
 
+class UpdateCheckWorker(QThread):
+    """后台检查更新的 Worker"""
+    finished = pyqtSignal(bool, str, str, str)  # (has_update, latest_version, download_url, error)
+    
+    GITHUB_API_URL = "https://api.github.com/repos/YHalo-wyh/YNU-xk_spider-Pro/releases/latest"
+    
+    def __init__(self, current_version):
+        super().__init__()
+        self.current_version = current_version
+    
+    def run(self):
+        try:
+            with requests.Session() as session:
+                resp = session.get(self.GITHUB_API_URL, timeout=(5, 10))
+                
+                if resp.status_code == 200:
+                    data = resp.json()
+                    latest_version = data.get('tag_name', '').lstrip('v')
+                    download_url = data.get('html_url', '')
+                    release_notes = data.get('body', '')[:500]
+                    
+                    if not latest_version:
+                        self.finished.emit(False, '', '', '无法获取版本号')
+                        return
+                    
+                    # 版本比较
+                    has_update = self._compare_versions(latest_version, self.current_version)
+                    self.finished.emit(has_update, latest_version, download_url, '')
+                    
+                elif resp.status_code == 404:
+                    self.finished.emit(False, '', '', '暂无发布版本')
+                else:
+                    self.finished.emit(False, '', '', f'HTTP {resp.status_code}')
+                    
+        except requests.exceptions.Timeout:
+            self.finished.emit(False, '', '', '请求超时')
+        except Exception as e:
+            self.finished.emit(False, '', '', f'网络错误: {str(e)[:50]}')
+    
+    def _compare_versions(self, latest, current):
+        """比较版本号，返回 True 表示有更新"""
+        try:
+            def version_tuple(v):
+                return tuple(map(int, v.split('.')))
+            return version_tuple(latest) > version_tuple(current)
+        except:
+            return latest != current
+
+
 class CourseFetchWorker(QThread):
     """后台获取课程列表的 Worker"""
     finished = pyqtSignal(dict, str)  # (courses_grouped, error)
@@ -80,7 +129,7 @@ class CourseFetchWorker(QThread):
                     "checkCapacity": "2",
                     "queryContent": self.search_keyword
                 },
-                "pageSize": "500",  # 增大分页防止截断
+                "pageSize": "500",
                 "pageNumber": "0",
                 "order": ""
             }
@@ -97,18 +146,21 @@ class CourseFetchWorker(QThread):
             
             cookie_dict = self._parse_cookies(self.cookies)
             data = {"querySetting": json.dumps(query_param, ensure_ascii=False)}
-            resp = requests.post(url, headers=headers, cookies=cookie_dict, 
-                               data=data, timeout=(3, 10), verify=False)
             
-            if resp.status_code == 200:
-                result = resp.json()
-                if result.get('code') == '1' or 'dataList' in result:
-                    courses_grouped = self._parse_course_list(result.get('dataList', []))
-                    self.finished.emit(courses_grouped, '')
+            # 使用 Session 上下文管理器确保连接正确释放
+            with requests.Session() as session:
+                resp = session.post(url, headers=headers, cookies=cookie_dict, 
+                                   data=data, timeout=(3, 10), verify=False)
+                
+                if resp.status_code == 200:
+                    result = resp.json()
+                    if result.get('code') == '1' or 'dataList' in result:
+                        courses_grouped = self._parse_course_list(result.get('dataList', []))
+                        self.finished.emit(courses_grouped, '')
+                    else:
+                        self.finished.emit({}, result.get('msg', '未知错误'))
                 else:
-                    self.finished.emit({}, result.get('msg', '未知错误'))
-            else:
-                self.finished.emit({}, f"HTTP {resp.status_code}")
+                    self.finished.emit({}, f"HTTP {resp.status_code}")
         except Exception as e:
             self.finished.emit({}, str(e)[:50])
     
@@ -403,14 +455,16 @@ class MultiGrabWorker(QThread):
             self._request_count += 1
             count = self._request_count
         
-        # 发送心跳信号
-        self.heartbeat.emit(count)
+        current_time = time.time()
+        
+        # 每 10 次请求或每 5 秒发送一次心跳信号到 UI（减少跨线程通信）
+        if count % 10 == 0 or (current_time - self._last_heartbeat_time) >= 5:
+            self.heartbeat.emit(count)
         
         # 每 60 次请求或每 30 秒发送一次保活日志
-        current_time = time.time()
         if count % 60 == 0 or (current_time - self._last_heartbeat_time) >= 30:
             self._last_heartbeat_time = current_time
-            self.status.emit(f"[系统] 💓 正在持续监控中... (已检测 {count} 次)")
+            self.status.emit(f"[系统] 正在持续监控中... (已检测 {count} 次)")
             self._logger.info(f"心跳: 已检测 {count} 次")
         
         # 每 60 秒检测一次登录状态
