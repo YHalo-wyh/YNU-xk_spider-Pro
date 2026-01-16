@@ -335,6 +335,7 @@ class MultiGrabWorker(QThread):
     course_available = pyqtSignal(str, str, int, int)  # (课程名, 教师, 余量, 容量)
     session_updated = pyqtSignal(str, str)  # (token, cookies)
     heartbeat = pyqtSignal(int)           # 心跳信号 (总请求次数)
+    login_status = pyqtSignal(bool, str)  # 登录状态信号 (是否在线, 状态描述)
     
     def __init__(self, courses, student_code, batch_code, token, cookies,
                  username='', password='', max_workers=5, serverchan_key=''):
@@ -365,6 +366,7 @@ class MultiGrabWorker(QThread):
         self._request_count = 0
         self._request_count_lock = threading.Lock()
         self._last_heartbeat_time = time.time()
+        self._last_login_check_time = time.time()  # 上次登录状态检测时间
         
         # 初始化 HTTP Session（大连接池）
         self.http_session = requests.Session()
@@ -410,6 +412,11 @@ class MultiGrabWorker(QThread):
             self._last_heartbeat_time = current_time
             self.status.emit(f"[系统] 💓 正在持续监控中... (已检测 {count} 次)")
             self._logger.info(f"心跳: 已检测 {count} 次")
+        
+        # 每 60 秒检测一次登录状态
+        if (current_time - self._last_login_check_time) >= 60:
+            self._last_login_check_time = current_time
+            self._check_login_status()
     
     def add_course(self, course):
         """线程安全地添加课程"""
@@ -459,6 +466,53 @@ class MultiGrabWorker(QThread):
                 k, v = item.split('=', 1)
                 cookie_dict[k] = v
         return cookie_dict
+    
+    def _check_login_status(self):
+        """检测登录状态"""
+        try:
+            # 使用一个轻量级 API 检测登录状态
+            url = f"{BASE_URL}/elective/courseList.do"
+            query_param = {
+                "data": {
+                    "studentCode": self.student_code,
+                    "electiveBatchCode": self.batch_code,
+                },
+                "pageSize": "1",
+                "pageNumber": "0",
+                "order": ""
+            }
+            
+            resp = self.http_session.post(
+                url,
+                headers=self._get_headers(),
+                cookies=self._parse_cookies(self.cookies),
+                data={"querySetting": json.dumps(query_param, ensure_ascii=False)},
+                timeout=(3, 5),
+                verify=False,
+                allow_redirects=False
+            )
+            
+            # 检查是否过期
+            if resp.status_code == 302 or self._is_session_expired(response=resp):
+                self.login_status.emit(False, "Session 已过期")
+                self.status.emit("[登录] ⚠️ Session 已过期，正在尝试重登...")
+                return
+            
+            if resp.status_code == 200:
+                result = resp.json()
+                if self._is_session_expired(result=result):
+                    self.login_status.emit(False, "Session 已过期")
+                    self.status.emit("[登录] ⚠️ Session 已过期，正在尝试重登...")
+                else:
+                    self.login_status.emit(True, "在线")
+                    self.status.emit("[登录] ✅ 登录状态正常")
+            else:
+                self.login_status.emit(False, f"HTTP {resp.status_code}")
+                
+        except requests.exceptions.Timeout:
+            self.login_status.emit(False, "网络超时")
+        except Exception as e:
+            self.login_status.emit(False, f"检测失败: {str(e)[:20]}")
     
     def _get_headers(self):
         """获取请求头"""
@@ -1468,6 +1522,11 @@ class MultiGrabWorker(QThread):
                 # 休眠后继续下次查询
                 time.sleep(1.5)
                 continue
+            
+            # 成功查询到余量，打印状态日志
+            is_full_flag = course_info.get('isFull', False) if course_info else False
+            status_mark = "满" if is_full_flag or remain <= 0 else "有余量"
+            self.status.emit(f"[查询] {course_name} 余量: {remain}/{capacity} ({status_mark})")
             
             # 状态变化检测（减少日志噪音）
             last_remain = state.get('last_remain', -999)
