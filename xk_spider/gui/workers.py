@@ -204,10 +204,22 @@ class CourseFetchWorker(QThread):
         is_conflict = parse_bool_field(tc.get('isConflict'))
         is_chosen = parse_bool_field(tc.get('isChoose') or tc.get('isChosen'))
         
+        # 提取教师名和体育项目名
+        teacher_name = tc.get('teacherName') or tc.get('SKJS', '')
+        sport_name = tc.get('sportName', '')  # 体育课程特有字段
+        
+        # 如果有体育项目名，拼接到教师名后面
+        if sport_name:
+            display_teacher = f"{teacher_name} -- {sport_name}"
+        else:
+            display_teacher = teacher_name
+        
         return {
             'JXBID': tc.get('teachingClassID') or tc.get('JXBID', ''),
             'KCM': course_name,
-            'SKJS': tc.get('teacherName') or tc.get('SKJS', ''),
+            'SKJS': display_teacher,  # 教师名 + 体育项目名
+            'SKJS_RAW': teacher_name,  # 保留原始教师名（用于日志等）
+            'SPORT_NAME': sport_name,  # 保留体育项目名（用于后续处理）
             'SKSJ': tc.get('teachingPlace') or tc.get('classTime') or tc.get('SKSJ', ''),
             'KRL': parse_int_field(tc.get('classCapacity') or tc.get('KRL')),
             'YXRS': parse_int_field(tc.get('numberOfFirstVolunteer') or tc.get('YXRS')),
