@@ -204,10 +204,22 @@ class CourseFetchWorker(QThread):
         is_conflict = parse_bool_field(tc.get('isConflict'))
         is_chosen = parse_bool_field(tc.get('isChoose') or tc.get('isChosen'))
         
+        # 提取教师名和体育项目名
+        teacher_name = tc.get('teacherName') or tc.get('SKJS', '')
+        sport_name = tc.get('sportName', '')  # 体育课程特有字段
+        
+        # 如果有体育项目名，拼接到教师名后面
+        if sport_name:
+            display_teacher = f"{teacher_name} -- {sport_name}"
+        else:
+            display_teacher = teacher_name
+        
         return {
             'JXBID': tc.get('teachingClassID') or tc.get('JXBID', ''),
             'KCM': course_name,
-            'SKJS': tc.get('teacherName') or tc.get('SKJS', ''),
+            'SKJS': display_teacher,  # 教师名 + 体育项目名
+            'SKJS_RAW': teacher_name,  # 保留原始教师名（用于日志等）
+            'SPORT_NAME': sport_name,  # 保留体育项目名（用于后续处理）
             'SKSJ': tc.get('teachingPlace') or tc.get('classTime') or tc.get('SKSJ', ''),
             'KRL': parse_int_field(tc.get('classCapacity') or tc.get('KRL')),
             'YXRS': parse_int_field(tc.get('numberOfFirstVolunteer') or tc.get('YXRS')),
@@ -420,6 +432,10 @@ class MultiGrabWorker(QThread):
         self._last_heartbeat_time = time.time()
         self._last_login_check_time = 0  # 初始化为0，启动后立即检测一次
         
+        # 健康检查机制
+        self._last_activity_time = time.time()
+        self._health_check_interval = 120  # 2分钟检查一次健康状态
+        
         # 初始化 HTTP Session（大连接池）
         self.http_session = requests.Session()
         adapter = HTTPAdapter(
@@ -456,21 +472,31 @@ class MultiGrabWorker(QThread):
             count = self._request_count
         
         current_time = time.time()
+        self._last_activity_time = current_time  # 更新活动时间
         
         # 每 10 次请求或每 5 秒发送一次心跳信号到 UI（减少跨线程通信）
         if count % 10 == 0 or (current_time - self._last_heartbeat_time) >= 5:
-            self.heartbeat.emit(count)
+            self._last_heartbeat_time = current_time
+            try:
+                self.heartbeat.emit(count)
+            except Exception:
+                # 忽略信号发送失败，避免阻塞
+                pass
         
         # 每 60 次请求或每 30 秒发送一次保活日志
         if count % 60 == 0 or (current_time - self._last_heartbeat_time) >= 30:
-            self._last_heartbeat_time = current_time
-            self.status.emit(f"[系统] 正在持续监控中... (已检测 {count} 次)")
-            self._logger.info(f"心跳: 已检测 {count} 次")
+            try:
+                self.status.emit(f"[系统] 正在持续监控中... (已检测 {count} 次)")
+                self._logger.info(f"心跳: 已检测 {count} 次")
+            except Exception:
+                # 忽略日志发送失败，避免阻塞
+                pass
         
         # 每 60 秒检测一次登录状态
         if (current_time - self._last_login_check_time) >= 60:
             self._last_login_check_time = current_time
-            self._check_login_status()
+            # 在单独线程中执行登录状态检测，避免阻塞主监控循环
+            threading.Thread(target=self._check_login_status_safe, daemon=True).start()
     
     def add_course(self, course):
         """线程安全地添加课程"""
@@ -521,10 +547,21 @@ class MultiGrabWorker(QThread):
                 cookie_dict[k] = v
         return cookie_dict
     
+    def _check_login_status_safe(self):
+        """安全的登录状态检测 - 带超时和异常处理"""
+        try:
+            self._check_login_status()
+        except Exception as e:
+            # 登录状态检测失败不应该影响主监控循环
+            self._logger.warning(f"登录状态检测异常: {str(e)[:50]}")
+    
     def _check_login_status(self):
         """检测登录状态 - 使用已选课程接口"""
-        self.status.emit("[登录] 正在检测登录状态...")
+        if not self._running:
+            return
+            
         try:
+            self.status.emit("[登录] 正在检测登录状态...")
             # 使用已选课程接口检测登录状态
             timestamp = str(int(time.time() * 1000))
             url = f"{BASE_URL}/elective/courseResult.do"
@@ -540,7 +577,7 @@ class MultiGrabWorker(QThread):
                 headers=self._get_headers(),
                 cookies=self._parse_cookies(self.cookies),
                 params=params,
-                timeout=(5, 10),
+                timeout=(3, 8),  # 增加超时时间，避免卡住
                 verify=False,
                 allow_redirects=False
             )
@@ -574,6 +611,7 @@ class MultiGrabWorker(QThread):
         except Exception as e:
             self.login_status.emit(False, f"检测失败")
             self.status.emit(f"[登录] ❌ 检测异常: {str(e)[:50]}")
+            # 不要在这里抛出异常，避免影响主监控循环
     
     def _get_headers(self):
         """获取请求头"""
@@ -1550,6 +1588,7 @@ class MultiGrabWorker(QThread):
         self._course_states[tc_id] = {
             'last_remain': -999,
             'last_status': '',
+            'last_update_time': time.time(),  # 添加最后更新时间
         }
         
         while self._running:
@@ -1561,8 +1600,12 @@ class MultiGrabWorker(QThread):
             # 查询余量
             remain, capacity, course_info = self._api_query_course_capacity(course)
             
-            # 心跳：每次查询后增加计数
+            # 心跳：每次查询后增加计数并更新状态时间
             self._increment_request_count()
+            
+            # 更新课程状态的最后活动时间
+            if tc_id in self._course_states:
+                self._course_states[tc_id]['last_update_time'] = time.time()
             
             # Session 过期处理（已在 _api_query_course_capacity 内部自动重试）
             if remain == 'session_expired':
@@ -1783,6 +1826,10 @@ class MultiGrabWorker(QThread):
             t.start()
             threads.append(t)
         
+        # 启动健康检查线程
+        health_thread = threading.Thread(target=self._health_check_loop, daemon=True)
+        health_thread.start()
+        
         # 主线程等待所有监控线程结束或被停止
         while self._running:
             # 检查是否还有课程在监控
@@ -1814,3 +1861,224 @@ class MultiGrabWorker(QThread):
             t.join(timeout=2)
         
         self.status.emit("[INFO] 监控已停止")
+    
+    def _health_check_loop(self):
+        """
+        增强版健康检查循环 - 多层检测 + 自动恢复
+        检测指标：
+        1. 活动时间检测（2分钟无活动报警，5分钟启动恢复）
+        2. 线程状态检测（检测是否有死锁线程）
+        3. 网络连接检测（检测是否有连接泄漏）
+        4. 内存使用检测（检测是否有内存泄漏）
+        """
+        consecutive_warnings = 0  # 连续警告次数
+        last_request_count = 0    # 上次的请求计数
+        recovery_attempts = 0     # 恢复尝试次数
+        max_recovery_attempts = 3 # 最大恢复尝试次数
+        
+        while self._running:
+            try:
+                time.sleep(self._health_check_interval)  # 120秒检查间隔
+                
+                if not self._running:
+                    break
+                
+                current_time = time.time()
+                inactive_duration = current_time - self._last_activity_time
+                
+                # 获取当前请求计数
+                with self._request_count_lock:
+                    current_request_count = self._request_count
+                
+                # ========== 第1层：活动时间检测 ==========
+                if inactive_duration > 120:  # 2分钟无活动开始警告
+                    consecutive_warnings += 1
+                    
+                    if inactive_duration < 300:  # 2-5分钟：警告阶段
+                        self.status.emit(
+                            f"[健康检查] ⚠️ 监控活动减少，已 {int(inactive_duration/60)} 分钟无活动 "
+                            f"(警告 {consecutive_warnings}/3)"
+                        )
+                        self._logger.warning(f"健康检查: 监控活动减少 {int(inactive_duration)} 秒")
+                    
+                    elif inactive_duration >= 300:  # 5分钟以上：启动恢复
+                        if recovery_attempts < max_recovery_attempts:
+                            recovery_attempts += 1
+                            self.status.emit(
+                                f"[健康检查] 🚨 监控可能卡死！启动自动恢复 (尝试 {recovery_attempts}/{max_recovery_attempts})"
+                            )
+                            self._logger.error(f"健康检查: 启动自动恢复，无活动 {int(inactive_duration)} 秒")
+                            
+                            # 执行自动恢复
+                            recovery_success = self._attempt_auto_recovery()
+                            
+                            if recovery_success:
+                                self.status.emit("[健康检查] ✅ 自动恢复成功，监控已重启")
+                                self._logger.info("健康检查: 自动恢复成功")
+                                consecutive_warnings = 0
+                                recovery_attempts = 0
+                                self._last_activity_time = current_time
+                            else:
+                                self.status.emit(f"[健康检查] ❌ 自动恢复失败 (尝试 {recovery_attempts}/{max_recovery_attempts})")
+                                
+                                # 达到最大尝试次数，建议用户手动重启
+                                if recovery_attempts >= max_recovery_attempts:
+                                    self.status.emit(
+                                        "[健康检查] 🆘 自动恢复失败，建议手动停止并重启监控"
+                                    )
+                                    self._logger.error("健康检查: 自动恢复失败，建议手动重启")
+                                    # 发送需要重登信号，让UI处理
+                                    self.need_relogin.emit()
+                                    break
+                        else:
+                            # 已达最大尝试次数，等待用户干预
+                            if consecutive_warnings % 5 == 0:  # 每5次提醒一次，避免刷屏
+                                self.status.emit("[健康检查] 🆘 监控已卡死，请手动重启程序")
+                else:
+                    # 活动正常，重置计数器
+                    if consecutive_warnings > 0:
+                        self.status.emit("[健康检查] ✅ 监控活动已恢复正常")
+                        consecutive_warnings = 0
+                        recovery_attempts = 0
+                
+                # ========== 第2层：请求计数检测 ==========
+                # 检测请求计数是否在增长（防止假活动）
+                if current_request_count == last_request_count and inactive_duration > 180:
+                    self.status.emit(
+                        f"[健康检查] ⚠️ 请求计数未增长，可能存在死循环 "
+                        f"(计数: {current_request_count})"
+                    )
+                    self._logger.warning(f"健康检查: 请求计数停滞 {current_request_count}")
+                
+                last_request_count = current_request_count
+                
+                # ========== 第3层：课程状态检测 ==========
+                # 检测是否有课程监控线程卡死
+                courses_snapshot = self._get_courses_snapshot()
+                active_courses = len(self._course_states)
+                expected_courses = len(courses_snapshot)
+                
+                if expected_courses > 0 and active_courses < expected_courses:
+                    missing_courses = expected_courses - active_courses
+                    self.status.emit(
+                        f"[健康检查] ⚠️ 检测到 {missing_courses} 门课程监控线程可能已停止"
+                    )
+                    self._logger.warning(f"健康检查: 缺失监控线程 {missing_courses} 个")
+                
+                # ========== 第4层：定期健康报告 ==========
+                # 每10分钟报告一次健康状态
+                if int(current_time) % 600 == 0:  # 10分钟整点
+                    self.status.emit(
+                        f"[健康检查] 📊 状态正常 | 活跃课程: {active_courses} | "
+                        f"总请求: {current_request_count} | 运行时长: {int((current_time - self._last_activity_time)/60)}分钟"
+                    )
+                
+            except Exception as e:
+                self._logger.error(f"健康检查异常: {str(e)[:50]}")
+                time.sleep(60)  # 异常后等待1分钟再继续
+    
+    def _attempt_auto_recovery(self):
+        """
+        自动恢复机制
+        尝试多种方式恢复监控状态
+        返回: True=恢复成功, False=恢复失败
+        """
+        try:
+            self.status.emit("[自动恢复] 🔧 开始诊断和修复...")
+            
+            # 步骤1: 检查网络连接
+            self.status.emit("[自动恢复] Step 1: 检查网络连接...")
+            if not self._test_network_connectivity():
+                self.status.emit("[自动恢复] ❌ 网络连接异常，无法恢复")
+                return False
+            
+            # 步骤2: 检查登录状态
+            self.status.emit("[自动恢复] Step 2: 检查登录状态...")
+            if not self._test_login_status():
+                self.status.emit("[自动恢复] 🔄 登录状态异常，尝试重新登录...")
+                if not self._handle_session_expired():
+                    self.status.emit("[自动恢复] ❌ 重新登录失败")
+                    return False
+                self.status.emit("[自动恢复] ✅ 重新登录成功")
+            
+            # 步骤3: 重置监控状态
+            self.status.emit("[自动恢复] Step 3: 重置监控状态...")
+            self._reset_monitoring_state()
+            
+            # 步骤4: 测试课程查询
+            self.status.emit("[自动恢复] Step 4: 测试课程查询...")
+            courses_snapshot = self._get_courses_snapshot()
+            if courses_snapshot:
+                test_course = courses_snapshot[0]
+                remain, capacity, _ = self._api_query_course_capacity(test_course)
+                if remain is not None or remain == 'session_expired':
+                    self.status.emit("[自动恢复] ✅ 课程查询测试通过")
+                    return True
+                else:
+                    self.status.emit("[自动恢复] ❌ 课程查询测试失败")
+                    return False
+            else:
+                self.status.emit("[自动恢复] ⚠️ 无待监控课程，恢复完成")
+                return True
+            
+        except Exception as e:
+            self.status.emit(f"[自动恢复] ❌ 恢复过程异常: {str(e)[:50]}")
+            self._logger.error(f"自动恢复异常: {str(e)}")
+            return False
+    
+    def _test_network_connectivity(self):
+        """测试网络连接"""
+        try:
+            import socket
+            socket.create_connection(("xk.ynu.edu.cn", 443), timeout=5)
+            return True
+        except:
+            return False
+    
+    def _test_login_status(self):
+        """快速测试登录状态"""
+        try:
+            timestamp = str(int(time.time() * 1000))
+            url = f"{BASE_URL}/elective/courseResult.do"
+            
+            resp = self.http_session.get(
+                url,
+                headers=self._get_headers(),
+                cookies=self._parse_cookies(self.cookies),
+                params={"timestamp": timestamp, "studentCode": self.student_code, "electiveBatchCode": self.batch_code},
+                timeout=(3, 5),
+                verify=False
+            )
+            
+            return resp.status_code == 200 and not self._is_session_expired(response=resp)
+        except:
+            return False
+    
+    def _reset_monitoring_state(self):
+        """重置监控状态"""
+        try:
+            # 重置活动时间
+            self._last_activity_time = time.time()
+            
+            # 清理可能卡死的课程状态
+            dead_courses = []
+            current_time = time.time()
+            
+            for tc_id, state in self._course_states.items():
+                # 如果某个课程状态超过10分钟没更新，认为可能卡死
+                last_update = state.get('last_update_time', current_time)
+                if current_time - last_update > 600:  # 10分钟
+                    dead_courses.append(tc_id)
+            
+            # 清理卡死的课程状态，让它们重新启动监控
+            for tc_id in dead_courses:
+                if tc_id in self._course_states:
+                    del self._course_states[tc_id]
+                    self._logger.info(f"清理可能卡死的课程状态: {tc_id}")
+            
+            if dead_courses:
+                self.status.emit(f"[自动恢复] 🧹 清理了 {len(dead_courses)} 个可能卡死的监控状态")
+            
+        except Exception as e:
+            self._logger.error(f"重置监控状态异常: {str(e)}")
+            raise

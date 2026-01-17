@@ -545,7 +545,7 @@ class MainWindow(QMainWindow):
     """主窗口 - Modern Dark Dashboard"""
     
     # 版本信息
-    VERSION = "1.4.0"
+    VERSION = "1.5.0"
     GITHUB_URL = "https://github.com/YHalo-wyh/YNU-xk_spider-Pro"
     
     def __init__(self):
@@ -1301,38 +1301,69 @@ class MainWindow(QMainWindow):
         日志方法：UI 滚动清理 + 文件持久化
         优化：减少 UI 操作频率，避免长时间运行后卡顿
         """
-        # 写入文件日志
-        self._logger.info(msg)
-        
-        # 计数器：每 50 条日志才检查一次是否需要清理
-        if not hasattr(self, '_log_count'):
-            self._log_count = 0
-        self._log_count += 1
-        
-        # 每 50 条检查一次，超过 500 行时清空到 200 行
-        if self._log_count % 50 == 0:
-            doc = self.log_text.document()
-            block_count = doc.blockCount()
-            if block_count > 500:
-                # 直接截取最后 200 行，比逐行删除快得多
-                text = self.log_text.toPlainText()
-                lines = text.split('\n')
-                if len(lines) > 200:
-                    self.log_text.setPlainText('\n'.join(lines[-200:]))
-        
-        # 追加新日志
-        self.log_text.append(f"[{time.strftime('%H:%M:%S')}] {msg}")
-        
-        # 每 10 条才滚动一次，减少 UI 刷新
-        if self._log_count % 10 == 0:
-            scrollbar = self.log_text.verticalScrollBar()
-            scrollbar.setValue(scrollbar.maximum())
+        try:
+            # 写入文件日志
+            self._logger.info(msg)
+            
+            # 计数器：每 50 条日志才检查一次是否需要清理
+            if not hasattr(self, '_log_count'):
+                self._log_count = 0
+            self._log_count += 1
+            
+            # 每 50 条检查一次，超过 500 行时清空到 200 行
+            if self._log_count % 50 == 0:
+                try:
+                    doc = self.log_text.document()
+                    block_count = doc.blockCount()
+                    if block_count > 500:
+                        # 直接截取最后 200 行，比逐行删除快得多
+                        text = self.log_text.toPlainText()
+                        lines = text.split('\n')
+                        if len(lines) > 200:
+                            self.log_text.setPlainText('\n'.join(lines[-200:]))
+                except Exception:
+                    # 日志清理失败不应该影响程序运行
+                    pass
+            
+            # 追加新日志
+            try:
+                self.log_text.append(f"[{time.strftime('%H:%M:%S')}] {msg}")
+            except Exception:
+                # 日志输出失败，尝试简化输出
+                try:
+                    self.log_text.append(f"[{time.strftime('%H:%M:%S')}] 日志输出异常")
+                except Exception:
+                    # 完全失败，忽略
+                    pass
+            
+            # 每 10 条才滚动一次，减少 UI 刷新
+            if self._log_count % 10 == 0:
+                try:
+                    scrollbar = self.log_text.verticalScrollBar()
+                    scrollbar.setValue(scrollbar.maximum())
+                except Exception:
+                    # 滚动失败不影响程序运行
+                    pass
+        except Exception as e:
+            # 整个日志方法失败，写入系统日志
+            try:
+                self._logger.error(f"日志输出异常: {str(e)[:50]}")
+            except Exception:
+                # 连系统日志都失败，完全忽略
+                pass
     
     def update_heartbeat(self, count):
         """更新心跳指示器 - 只更新文本，避免频繁设置样式"""
-        self._heartbeat_count = count
-        # 只更新文本，不频繁切换样式（避免内存泄漏和卡顿）
-        self.run_indicator.setText(f"⚡ 监控中 | 已扫描: {count} 次")
+        try:
+            self._heartbeat_count = count
+            # 只更新文本，不频繁切换样式（避免内存泄漏和卡顿）
+            self.run_indicator.setText(f"⚡ 监控中 | 已扫描: {count} 次")
+        except Exception as e:
+            # 心跳更新失败不应该影响程序运行
+            try:
+                self._logger.warning(f"心跳更新失败: {str(e)[:50]}")
+            except Exception:
+                pass
     
     def load_config(self):
         try:
