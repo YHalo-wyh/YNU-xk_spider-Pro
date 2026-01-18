@@ -545,7 +545,7 @@ class MainWindow(QMainWindow):
     """主窗口 - Modern Dark Dashboard"""
     
     # 版本信息
-    VERSION = "1.6.0"
+    VERSION = "1.7.0"
     GITHUB_URL = "https://github.com/YHalo-wyh/YNU-xk_spider-Pro"
     
     def __init__(self):
@@ -554,6 +554,7 @@ class MainWindow(QMainWindow):
         self.token = ''
         self.batch_code = ''
         self.student_code = ''
+        self.campus = '02'  # 默认呈贡校区
         self.cookies = ''
         self.multi_grab_worker = None
         self._api_courses_grouped = {}
@@ -1495,14 +1496,17 @@ class MainWindow(QMainWindow):
         self.login_worker.status.connect(lambda msg: self.statusBar().showMessage(f"🔐 {msg}"))
         self.login_worker.start()
     
-    def on_login_success(self, cookies, token, batch_code, student_code):
+    def on_login_success(self, cookies, token, batch_code, student_code, campus):
         self.cookies = cookies
         self.token = token
         self.batch_code = batch_code
         self.student_code = student_code
+        self.campus = campus  # 保存校区代码
         self.is_logged_in = True
         
-        self.status_label.setText(f"● 已登录 - {student_code}")
+        # 显示校区信息
+        campus_name = "呈贡校区" if campus == "02" else "东陆校区" if campus == "01" else f"校区{campus}"
+        self.status_label.setText(f"● 已登录 - {student_code} ({campus_name})")
         self.status_label.setStyleSheet(f"color: {Colors.GREEN}; font-weight: bold; font-size: 13px;")
         self.login_btn.setText("已登录")
         self.login_btn.setEnabled(False)
@@ -1510,6 +1514,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         
         self.log(f"[SUCCESS] ✓ 登录成功！")
+        self.log(f"[INFO] 校区: {campus_name} ({campus})")
         self.log(f"[INFO] Token: {token}")
         self.log(f"[INFO] BatchCode: {batch_code}")
         self.statusBar().showMessage("✓ 纯API模式已就绪，课程列表自动刷新中...")
@@ -1573,6 +1578,7 @@ class MainWindow(QMainWindow):
         self.token = ''
         self.batch_code = ''
         self.student_code = ''
+        self.campus = '02'  # 重置为默认
         self.cookies = ''
         
         self.status_label.setText("● 未登录")
@@ -1637,6 +1643,7 @@ class MainWindow(QMainWindow):
             batch_code=self.batch_code,
             course_type_code=course_type_code,
             internal_type=internal_type,
+            campus=self.campus,  # 传入校区代码
             search_keyword=search_keyword
         )
         self._course_fetch_worker.finished.connect(self._on_course_fetch_finished)
@@ -1892,6 +1899,7 @@ class MainWindow(QMainWindow):
             batch_code=self.batch_code,
             token=self.token,
             cookies=self.cookies,
+            campus=self.campus,  # 传入校区代码
             username=self.username_input.text(),
             password=self.password_input.text(),
             max_workers=self.concurrency_spin.value(),

@@ -104,7 +104,7 @@ class CourseFetchWorker(QThread):
     finished = pyqtSignal(dict, str)  # (courses_grouped, error)
     
     def __init__(self, token, cookies, student_code, batch_code, 
-                 course_type_code, internal_type, search_keyword=''):
+                 course_type_code, internal_type, campus='02', search_keyword=''):
         super().__init__()
         self.token = token
         self.cookies = cookies
@@ -112,6 +112,7 @@ class CourseFetchWorker(QThread):
         self.batch_code = batch_code
         self.course_type_code = course_type_code
         self.internal_type = internal_type
+        self.campus = campus  # 校区代码
         self.search_keyword = search_keyword
     
     def run(self):
@@ -121,7 +122,7 @@ class CourseFetchWorker(QThread):
             query_param = {
                 "data": {
                     "studentCode": self.student_code,
-                    "campus": "02",
+                    "campus": self.campus,  # 使用传入的校区代码
                     "electiveBatchCode": self.batch_code,
                     "isMajor": "1",
                     "teachingClassType": self.course_type_code,
@@ -234,7 +235,7 @@ class CourseFetchWorker(QThread):
 
 class LoginWorker(QThread):
     """纯API登录线程"""
-    success = pyqtSignal(str, str, str, str)  # cookies, token, batch_code, student_code
+    success = pyqtSignal(str, str, str, str, str)  # cookies, token, batch_code, student_code, campus
     failed = pyqtSignal(str)
     status = pyqtSignal(str)
     
@@ -264,6 +265,38 @@ class LoginWorker(QThread):
                 self._server_time_offset = server_time - local_mid
         except:
             self._server_time_offset = 0
+    
+    def _get_student_info(self, cookies, token, student_code):
+        """获取学生详细信息，提取校区代码"""
+        try:
+            session = requests.Session()
+            for key, value in cookies.items():
+                session.cookies.set(key, value)
+            
+            timestamp = str(self._get_server_timestamp())
+            resp = session.get(
+                f"{BASE_URL}/student/{student_code}.do?timestamp={timestamp}",
+                headers={
+                    "Accept": "*/*",
+                    "token": token,
+                    "X-Requested-With": "XMLHttpRequest"
+                },
+                timeout=(3, 8),
+                verify=False
+            )
+            
+            if resp.status_code == 200:
+                result = resp.json()
+                if result.get('code') == '1':
+                    data = result.get('data', {})
+                    campus = data.get('campus', '02')  # 默认呈贡校区
+                    campus_name = data.get('campusName', '未知')
+                    self.status.emit(f"✓ 校区: {campus_name}")
+                    return campus
+        except Exception as e:
+            self.status.emit(f"获取校区信息失败，使用默认值")
+        
+        return "02"  # 默认返回呈贡校区
     
     def _api_login_attempt(self):
         try:
@@ -368,7 +401,13 @@ class LoginWorker(QThread):
                 if token:
                     self.status.emit(f"✓ 登录成功！{login_data.get('name', '')}")
                     cookies_str = '; '.join([f"{k}={v}" for k, v in login_data['cookies'].items()])
-                    self.success.emit(cookies_str, token, DEFAULT_BATCH_CODE, login_data['number'])
+                    student_code = login_data['number']
+                    
+                    # 获取学生详细信息（包含校区）
+                    self.status.emit("获取学生信息...")
+                    campus = self._get_student_info(login_data['cookies'], token, student_code)
+                    
+                    self.success.emit(cookies_str, token, DEFAULT_BATCH_CODE, student_code, campus)
                     return
                 continue
                     
@@ -402,12 +441,13 @@ class MultiGrabWorker(QThread):
     login_status = pyqtSignal(bool, str)  # 登录状态信号 (是否在线, 状态描述)
     
     def __init__(self, courses, student_code, batch_code, token, cookies,
-                 username='', password='', max_workers=5, serverchan_key=''):
+                 campus='02', username='', password='', max_workers=5, serverchan_key=''):
         super().__init__()
         self.student_code = student_code
         self.batch_code = batch_code
         self.token = token
         self.cookies = cookies
+        self.campus = campus  # 校区代码
         self.username = username
         self.password = password
         self.max_workers = max_workers
@@ -745,7 +785,7 @@ class MultiGrabWorker(QThread):
             query_param = {
                 "data": {
                     "studentCode": self.student_code,
-                    "campus": "02",
+                    "campus": self.campus,  # 使用传入的校区代码
                     "electiveBatchCode": self.batch_code,
                     "isMajor": "1",
                     "teachingClassType": course_type_code,
@@ -861,7 +901,7 @@ class MultiGrabWorker(QThread):
                     "teachingClassId": tc_id,
                     "teachingClassType": course_type_code,
                     "isMajor": "1",
-                    "campus": "02",
+                    "campus": self.campus,  # 使用传入的校区代码
                 }
             }
             
