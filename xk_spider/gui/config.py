@@ -42,6 +42,9 @@ DEFAULT_BATCH_CODE = "3d7ef3d38d4440a09b1ae65d3d7a04bc"
 # API 基础 URL
 BASE_URL = "https://xk.ynu.edu.cn/xsxkapp/sys/xsxkapp"
 
+# 监控状态文件路径（用于闪退恢复）
+MONITOR_STATE_FILE = "xk_spider/monitor_state.json"
+
 
 def get_api_endpoint(course_type):
     """获取课程类型对应的 API 端点"""

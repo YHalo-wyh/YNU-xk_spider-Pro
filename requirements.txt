@@ -20,5 +20,8 @@ onnxruntime>=1.12.0
 # 数值计算 (onnxruntime依赖)
 numpy>=1.21.0
 
+# 进程管理 (守护进程用)
+psutil>=5.9.0
+
 # 打包为exe (开发用，可选)
 # pyinstaller>=6.0.0

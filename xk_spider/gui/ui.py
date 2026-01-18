@@ -15,9 +15,9 @@ from PyQt5.QtWidgets import (
     QProgressDialog
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, pyqtProperty, QUrl
-from PyQt5.QtGui import QFont, QPainter, QColor, QTextCursor, QDesktopServices
+from PyQt5.QtGui import QFont, QPainter, QColor, QTextCursor, QDesktopServices, QIcon
 
-from .config import COURSE_TYPES, COURSE_NAME_TO_TYPE, parse_int
+from .config import COURSE_TYPES, COURSE_NAME_TO_TYPE, parse_int, MONITOR_STATE_FILE
 from .utils import OCR_AVAILABLE
 from .workers import LoginWorker, MultiGrabWorker, CourseFetchWorker, UpdateCheckWorker
 from .logger import get_logger
@@ -545,7 +545,7 @@ class MainWindow(QMainWindow):
     """主窗口 - Modern Dark Dashboard"""
     
     # 版本信息
-    VERSION = "1.5.0"
+    VERSION = "1.6.0"
     GITHUB_URL = "https://github.com/YHalo-wyh/YNU-xk_spider-Pro"
     
     def __init__(self):
@@ -581,6 +581,15 @@ class MainWindow(QMainWindow):
         self.init_menu()
         self.load_config()
         self.adjust_for_screen()
+        
+        # 检查是否需要恢复监控（闪退恢复）
+        self._pending_restore_state = None
+        state = self.load_monitor_state()
+        if state and state.get('is_monitoring') and state.get('courses'):
+            self._pending_restore_state = state
+            self._logger.info(f"检测到上次监控未正常结束，待恢复 {len(state['courses'])} 门课程")
+            # 延迟自动登录（等待窗口显示后）
+            QTimer.singleShot(500, self._auto_login_for_restore)
     
     def adjust_for_screen(self):
         screen = QApplication.primaryScreen()
@@ -596,6 +605,12 @@ class MainWindow(QMainWindow):
     
     def init_ui(self):
         self.setWindowTitle('YNU选课助手 Pro')
+        
+        # 设置窗口图标
+        icon_path = os.path.join(os.path.dirname(__file__), '..', '..', 'assets', 'icon.ico')
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+        
         self.setMinimumSize(1000, 650)
         self.setStyleSheet(GLOBAL_STYLESHEET)
         
@@ -1399,6 +1414,63 @@ class MainWindow(QMainWindow):
         except:
             pass
 
+    def save_monitor_state(self, is_monitoring=False):
+        """保存监控状态到文件（用于闪退恢复）"""
+        state = {
+            'is_monitoring': is_monitoring,
+            'courses': [],
+            'course_type': self.course_type_combo.currentText(),
+            'concurrency': self.concurrency_spin.value(),
+            'timestamp': time.time(),
+        }
+        
+        if is_monitoring:
+            # 保存待抢课程列表
+            for i in range(self.grab_list.count()):
+                item = self.grab_list.item(i)
+                course = item.data(Qt.UserRole)
+                if course:
+                    state['courses'].append(course)
+        
+        try:
+            os.makedirs('xk_spider', exist_ok=True)
+            with open(MONITOR_STATE_FILE, 'w', encoding='utf-8') as f:
+                json.dump(state, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            self._logger.error(f"保存监控状态失败: {e}")
+
+    def load_monitor_state(self):
+        """加载监控状态文件"""
+        try:
+            if os.path.exists(MONITOR_STATE_FILE):
+                with open(MONITOR_STATE_FILE, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception as e:
+            self._logger.error(f"加载监控状态失败: {e}")
+        return None
+
+    def clear_monitor_state(self):
+        """清除监控状态文件"""
+        try:
+            if os.path.exists(MONITOR_STATE_FILE):
+                os.remove(MONITOR_STATE_FILE)
+        except Exception:
+            pass
+
+    def _auto_login_for_restore(self):
+        """闪退恢复时自动登录"""
+        username = self.username_input.text().strip()
+        password = self.password_input.text().strip()
+        
+        if not username or not password:
+            self.log("[WARN] 无法自动登录：缺少保存的用户名或密码")
+            self._pending_restore_state = None
+            self.clear_monitor_state()
+            return
+        
+        self.log("[INFO] 正在自动登录以恢复监控...")
+        self.login()
+
     def login(self):
         username = self.username_input.text().strip()
         password = self.password_input.text().strip()
@@ -1442,7 +1514,44 @@ class MainWindow(QMainWindow):
         self.log(f"[INFO] BatchCode: {batch_code}")
         self.statusBar().showMessage("✓ 纯API模式已就绪，课程列表自动刷新中...")
         
-        if self._pending_monitor_courses:
+        # 优先从状态文件恢复（闪退恢复）
+        if self._pending_restore_state and self._pending_restore_state.get('courses'):
+            courses = self._pending_restore_state['courses']
+            self.log(f"[INFO] 从状态文件恢复 {len(courses)} 门监控课程")
+            
+            # 恢复并发数设置
+            if 'concurrency' in self._pending_restore_state:
+                self.concurrency_spin.setValue(self._pending_restore_state['concurrency'])
+            
+            # 添加课程到待抢列表
+            for course in courses:
+                tc_id = course.get('JXBID', '')
+                exists = False
+                for i in range(self.grab_list.count()):
+                    item = self.grab_list.item(i)
+                    if item and item.data(Qt.UserRole) and item.data(Qt.UserRole).get('JXBID') == tc_id:
+                        exists = True
+                        break
+                
+                if not exists:
+                    course_name = course.get('KCM', '')
+                    teacher = course.get('SKJS', '')
+                    is_conflict = course.get('isConflict', False)
+                    display_text = f"{course_name} - {teacher}"
+                    if is_conflict:
+                        display_text += " ⚠️"
+                    
+                    item = QListWidgetItem(display_text)
+                    item.setData(Qt.UserRole, course)
+                    self.grab_list.addItem(item)
+            
+            self.grab_count_label.setText(f"待抢: {self.grab_list.count()} 门")
+            self._pending_restore_state = None
+            
+            # 自动开始监控
+            self.log("[INFO] 自动恢复监控中...")
+            QTimer.singleShot(1000, self.start_monitoring)
+        elif self._pending_monitor_courses:
             self.log(f"[INFO] 检测到 {len(self._pending_monitor_courses)} 门待恢复课程")
             QTimer.singleShot(1000, self._resume_monitoring)
         else:
@@ -1800,6 +1909,9 @@ class MainWindow(QMainWindow):
         
         self.multi_grab_worker.start()
         
+        # 立即保存监控状态（即使程序崩溃也能恢复）
+        self.save_monitor_state(is_monitoring=True)
+        
         self.start_grab_btn.setEnabled(False)
         self.stop_grab_btn.setEnabled(True)
         self.run_indicator.setText("⚡ 监控中 | 已扫描: 0 次")
@@ -1816,7 +1928,7 @@ class MainWindow(QMainWindow):
         """)
         self.statusBar().showMessage("🎯 监控中...")
     
-    def stop_monitoring(self):
+    def stop_monitoring(self, clear_state=True):
         if self.multi_grab_worker:
             self.multi_grab_worker.stop()
             self.multi_grab_worker.wait(2000)
@@ -1838,6 +1950,10 @@ class MainWindow(QMainWindow):
         """)
         self.statusBar().showMessage("⏹ 监控已停止")
         self.log("[INFO] 监控已停止")
+        
+        # 只有用户主动停止时才清除状态文件
+        if clear_state:
+            self.clear_monitor_state()
     
     def on_grab_success(self, msg, course):
         self.log(f"[SUCCESS] ✅ {msg}")
@@ -1968,7 +2084,13 @@ class MainWindow(QMainWindow):
         self.refresh_courses(silent=True)
     
     def closeEvent(self, event):
+        """程序关闭事件"""
+        # 保存监控状态（如果正在监控中则标记 is_monitoring=True，用于重启恢复）
+        is_monitoring = self.multi_grab_worker is not None and self.multi_grab_worker.isRunning()
+        self.save_monitor_state(is_monitoring=is_monitoring)
+        
         self.poll_timer.stop()
-        self.stop_monitoring()
+        # 关闭程序时不清除状态文件，让程序可以自动重启恢复
+        self.stop_monitoring(clear_state=False)
         self.save_config()
         event.accept()
