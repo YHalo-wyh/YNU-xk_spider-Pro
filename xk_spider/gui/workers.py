@@ -471,6 +471,7 @@ class MultiGrabWorker(QThread):
         self._request_count_lock = threading.Lock()
         self._last_heartbeat_time = time.time()
         self._last_login_check_time = 0  # 初始化为0，启动后立即检测一次
+        self._login_check_in_progress = False  # 防止登录检测线程重复创建
         
         # 健康检查机制
         self._last_activity_time = time.time()
@@ -532,9 +533,10 @@ class MultiGrabWorker(QThread):
                 # 忽略日志发送失败，避免阻塞
                 pass
         
-        # 每 60 秒检测一次登录状态
-        if (current_time - self._last_login_check_time) >= 60:
+        # 每 60 秒检测一次登录状态（防止线程重复创建）
+        if (current_time - self._last_login_check_time) >= 60 and not self._login_check_in_progress:
             self._last_login_check_time = current_time
+            self._login_check_in_progress = True
             # 在单独线程中执行登录状态检测，避免阻塞主监控循环
             threading.Thread(target=self._check_login_status_safe, daemon=True).start()
     
@@ -594,6 +596,9 @@ class MultiGrabWorker(QThread):
         except Exception as e:
             # 登录状态检测失败不应该影响主监控循环
             self._logger.warning(f"登录状态检测异常: {str(e)[:50]}")
+        finally:
+            # 重置标志位，允许下次检测
+            self._login_check_in_progress = False
     
     def _check_login_status(self):
         """检测登录状态 - 使用已选课程接口"""
@@ -1892,6 +1897,9 @@ class MultiGrabWorker(QThread):
                     )
                     t.start()
                     threads.append(t)
+            
+            # 定期清理已结束的线程引用，防止列表无限增长
+            threads = [t for t in threads if t.is_alive()]
             
             time.sleep(0.5)
         
