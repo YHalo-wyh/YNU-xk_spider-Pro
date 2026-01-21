@@ -21,42 +21,64 @@ wheels/
 *.egg
 MANIFEST
 
-# Virtual Environment
-.venv/
+# Virtual Env
+.env
+.venv
+env/
 venv/
 ENV/
-env/
+env.bak/
+venv.bak/
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
 
-# OS
-.DS_Store
-Thumbs.db
-
-# Logs
-logs/
-*.log
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
 
 # PyInstaller
-*.spec
 *.manifest
+*.spec
 
-# NSIS
-installer.nsi
+# C extensions
+*.pyd
 
-# Test
-test_*.py
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
 
-# Config
+# Local config and logs
 xk_spider/config.json
+monitor_state.json
+xk_spider/monitor_state.json
+xk_spider/watchdog.lock
+logs/
+*.log
+crash.log
+xk_spider/crash.log
 
-# Build Output
-dist_new/
-upx.exe
-upx.zip
-rcedit.exe
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Temporary files
+新建 文本文档.txt

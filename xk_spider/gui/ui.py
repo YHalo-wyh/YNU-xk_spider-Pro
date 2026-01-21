@@ -545,7 +545,7 @@ class MainWindow(QMainWindow):
     """主窗口 - Modern Dark Dashboard"""
     
     # 版本信息
-    VERSION = "1.7.0"
+    VERSION = "1.8.0"
     GITHUB_URL = "https://github.com/YHalo-wyh/YNU-xk_spider-Pro"
     
     def __init__(self):
@@ -1964,53 +1964,86 @@ class MainWindow(QMainWindow):
             self.clear_monitor_state()
     
     def on_grab_success(self, msg, course):
-        self.log(f"[SUCCESS] ✅ {msg}")
-        
-        tc_id = course.get('JXBID', '')
-        for i in range(self.grab_list.count()):
-            item = self.grab_list.item(i)
-            if item and item.data(Qt.UserRole) and item.data(Qt.UserRole).get('JXBID') == tc_id:
-                self.grab_list.takeItem(i)
-                break
-        
-        self.grab_count_label.setText(f"待抢: {self.grab_list.count()} 门")
-        QMessageBox.information(self, "🎉 抢课成功", msg)
+        """抢课成功回调 - 带异常保护"""
+        try:
+            self.log(f"[SUCCESS] ✅ {msg}")
+            
+            tc_id = course.get('JXBID', '') if course else ''
+            for i in range(self.grab_list.count()):
+                item = self.grab_list.item(i)
+                if item and item.data(Qt.UserRole) and item.data(Qt.UserRole).get('JXBID') == tc_id:
+                    self.grab_list.takeItem(i)
+                    break
+            
+            self.grab_count_label.setText(f"待抢: {self.grab_list.count()} 门")
+            QMessageBox.information(self, "🎉 抢课成功", msg)
+        except Exception as e:
+            try:
+                self._logger.error(f"on_grab_success 异常: {str(e)[:50]}")
+            except Exception:
+                pass
     
     def on_grab_failed(self, msg):
-        self.log(f"[ERROR] {msg}")
+        """抢课失败回调 - 带异常保护"""
+        try:
+            self.log(f"[ERROR] {msg}")
+        except Exception:
+            pass
     
     def on_grab_status(self, msg):
-        self.log(msg)
-        self.statusBar().showMessage(msg)
+        """状态更新回调 - 带异常保护"""
+        try:
+            self.log(msg)
+            self.statusBar().showMessage(msg)
+        except Exception:
+            pass
     
     def on_session_updated(self, token, cookies):
-        self.token = token
-        self.cookies = cookies
-        self.log("[INFO] Session 已同步更新")
+        """Session 更新回调 - 带异常保护"""
+        try:
+            self.token = token
+            self.cookies = cookies
+            self.log("[INFO] Session 已同步更新")
+        except Exception:
+            pass
     
     def on_worker_finished(self):
-        self.start_grab_btn.setEnabled(True)
-        self.stop_grab_btn.setEnabled(False)
-        
-        if self._pending_monitor_courses and not self.is_logged_in:
-            self.log("[INFO] Worker 异常退出，尝试自动重登...")
-            self._auto_relogin_and_resume()
+        """Worker 完成回调 - 带异常保护"""
+        try:
+            self.start_grab_btn.setEnabled(True)
+            self.stop_grab_btn.setEnabled(False)
+            
+            if self._pending_monitor_courses and not self.is_logged_in:
+                self.log("[INFO] Worker 异常退出，尝试自动重登...")
+                self._auto_relogin_and_resume()
+        except Exception as e:
+            try:
+                self._logger.error(f"on_worker_finished 异常: {str(e)[:50]}")
+            except Exception:
+                pass
     
     def on_need_relogin(self):
-        self.log("[WARN] Session过期，准备自动重登...")
-        
-        pending_courses = []
-        for i in range(self.grab_list.count()):
-            item = self.grab_list.item(i)
-            course = item.data(Qt.UserRole)
-            if course:
-                pending_courses.append(course)
-        
-        self._pending_monitor_courses = pending_courses
-        self.log(f"[INFO] 已保存 {len(pending_courses)} 门待抢课程")
-        
-        self.stop_monitoring()
-        self._auto_relogin_and_resume()
+        """需要重登回调 - 带异常保护"""
+        try:
+            self.log("[WARN] Session过期，准备自动重登...")
+            
+            pending_courses = []
+            for i in range(self.grab_list.count()):
+                item = self.grab_list.item(i)
+                course = item.data(Qt.UserRole)
+                if course:
+                    pending_courses.append(course)
+            
+            self._pending_monitor_courses = pending_courses
+            self.log(f"[INFO] 已保存 {len(pending_courses)} 门待抢课程")
+            
+            self.stop_monitoring()
+            self._auto_relogin_and_resume()
+        except Exception as e:
+            try:
+                self._logger.error(f"on_need_relogin 异常: {str(e)[:50]}")
+            except Exception:
+                pass
     
     def _auto_relogin_and_resume(self):
         username = self.username_input.text().strip()

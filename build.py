@@ -63,7 +63,7 @@ def build_exe():
 
     
     # 清理旧文件
-    for folder in ["build", "dist_new"]:
+    for folder in ["build", "dist"]:
         if os.path.exists(folder):
             shutil.rmtree(folder)
     
@@ -78,15 +78,12 @@ def build_exe():
         "--onedir",            # 打包到一个目录（比onefile快且稳定）
         "--windowed",          # 无控制台
         "--noconfirm",
-        "--noconfirm",
         "--clean",
-        "--distpath=dist_new",  # 指定输出目录
         # 数据文件
         "--add-data=xk_spider;xk_spider",
         "--add-data=assets;assets",  # 添加 assets 文件夹（包含图标）
         # 收集所有依赖
         "--collect-all=ddddocr",
-        "--collect-all=onnxruntime",
         "--collect-all=certifi",
         # 排除不必要的重型库
         "--exclude-module=tensorflow",
@@ -120,11 +117,8 @@ def build_exe():
     from PyInstaller.__main__ import run
     run(args)
     
-    if os.path.exists("dist_new/YNU选课助手Pro"):
+    if os.path.exists("dist/YNU选课助手Pro"):
         print("[OK] EXE 打包成功！")
-        
-        pass
-        
         return True
     else:
         print("[ERROR] 打包失败")
@@ -136,7 +130,7 @@ def create_installer():
     print("步骤 2: 创建安装包")
     print("=" * 50)
     
-    dist_dir = "dist_new/YNU选课助手Pro"
+    dist_dir = "dist/YNU选课助手Pro"
     if not os.path.exists(dist_dir):
         print("[ERROR] 未找到打包目录")
         return False
@@ -147,8 +141,8 @@ def create_installer():
 
 Name "YNU选课助手 Pro"
 OutFile "YNU选课助手Pro_Setup.exe"
-InstallDir "$PROGRAMFILES\\YNU选课助手Pro"
-RequestExecutionLevel admin
+InstallDir "$LOCALAPPDATA\\YNU选课助手Pro"
+RequestExecutionLevel user
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
@@ -162,25 +156,24 @@ RequestExecutionLevel admin
 
 Section "Install"
     SetOutPath "$INSTDIR"
-    SetOutPath "$INSTDIR"
-    File /r "dist_new\\YNU选课助手Pro\\*.*"
+    File /r "dist\\YNU选课助手Pro\\*.*"
     
     ; 创建快捷方式
     CreateDirectory "$SMPROGRAMS\\YNU选课助手Pro"
     CreateShortcut "$SMPROGRAMS\\YNU选课助手Pro\\YNU选课助手Pro.lnk" "$INSTDIR\\YNU选课助手Pro.exe"
     CreateShortcut "$DESKTOP\\YNU选课助手Pro.lnk" "$INSTDIR\\YNU选课助手Pro.exe"
     
-    ; 写入卸载信息
+    ; 写入卸载信息（使用 HKCU 而不是 HKLM，不需要管理员权限）
     WriteUninstaller "$INSTDIR\\Uninstall.exe"
-    WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\YNU选课助手Pro" "DisplayName" "YNU选课助手 Pro"
-    WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\YNU选课助手Pro" "UninstallString" "$INSTDIR\\Uninstall.exe"
+    WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\YNU选课助手Pro" "DisplayName" "YNU选课助手 Pro"
+    WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\YNU选课助手Pro" "UninstallString" "$INSTDIR\\Uninstall.exe"
 SectionEnd
 
 Section "Uninstall"
     RMDir /r "$INSTDIR"
     RMDir /r "$SMPROGRAMS\\YNU选课助手Pro"
     Delete "$DESKTOP\\YNU选课助手Pro.lnk"
-    DeleteRegKey HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\YNU选课助手Pro"
+    DeleteRegKey HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\YNU选课助手Pro"
 SectionEnd
 """
     
@@ -205,18 +198,16 @@ SectionEnd
         try:
             subprocess.run([nsis_path, "installer.nsi"], check=True)
             if os.path.exists("YNU选课助手Pro_Setup.exe"):
-                shutil.move("YNU选课助手Pro_Setup.exe", "dist_new/YNU选课助手Pro_Setup.exe")
-                print("[OK] 安装包创建成功: dist_new/YNU选课助手Pro_Setup.exe")
+                shutil.move("YNU选课助手Pro_Setup.exe", "dist/YNU选课助手Pro_Setup.exe")
+                print("[OK] 安装包创建成功: dist/YNU选课助手Pro_Setup.exe")
                 return True
         except Exception as e:
             print(f"[WARN] NSIS 打包失败: {e}")
     
     # 如果没有 NSIS，创建 ZIP 便携版
     print("[*] 创建 ZIP 便携版...")
-    # 如果没有 NSIS，创建 ZIP 便携版
-    print("[*] 创建 ZIP 便携版...")
-    shutil.make_archive("dist_new/YNU选课助手Pro_Portable", "zip", "dist_new", "YNU选课助手Pro")
-    print("[OK] 便携版创建成功: dist_new/YNU选课助手Pro_Portable.zip")
+    shutil.make_archive("dist/YNU选课助手Pro_Portable", "zip", "dist", "YNU选课助手Pro")
+    print("[OK] 便携版创建成功: dist/YNU选课助手Pro_Portable.zip")
     
     # 提示安装 NSIS
     print("\n[提示] 如需创建安装包，请安装 NSIS:")
@@ -253,9 +244,9 @@ def main():
     print("=" * 50)
     
     dist_files = []
-    if os.path.exists("dist_new"):
-        for f in os.listdir("dist_new"):
-            path = os.path.join("dist_new", f)
+    if os.path.exists("dist"):
+        for f in os.listdir("dist"):
+            path = os.path.join("dist", f)
             if os.path.isfile(path):
                 size = os.path.getsize(path) / (1024 * 1024)
                 dist_files.append(f"  - {f} ({size:.1f} MB)")
