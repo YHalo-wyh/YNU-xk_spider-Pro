@@ -11,9 +11,8 @@ import subprocess
 import traceback
 import threading
 
-from PyQt5.QtWidgets import QApplication, QMessageBox
+from PyQt5.QtWidgets import QApplication
 
-from .utils import OCR_AVAILABLE
 from .ui import MainWindow
 from .config import MONITOR_STATE_FILE
 
@@ -139,18 +138,8 @@ def run_app():
             from PyQt5.QtGui import QIcon
             app.setWindowIcon(QIcon(icon_path))
         
-        if not OCR_AVAILABLE:
-            QMessageBox.critical(
-                None, "错误", 
-                "OCR模块(ddddocr)未安装！\n\n纯API版本需要OCR支持。\n请安装: pip install ddddocr"
-            )
-            return False  # 无法修复的错误，不重启
-        
         window = MainWindow()
         window.show()
-        
-        # 启动后台守护进程（窗口显示后）
-        start_watchdog(os.getpid())
         
         app.exec_()
 

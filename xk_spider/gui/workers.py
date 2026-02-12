@@ -1363,7 +1363,7 @@ class MultiGrabWorker(QThread):
         Step 2: 退掉冲突的旧课
         Step 3: 抢入目标课程
         Step 4: 核实是否成功
-        Step 5: 失败则进入紧急救援模式 - 持续5分钟死磕回滚
+        Step 5: 失败则进入紧急救援模式 - 未成功持续回滚直到成功
         
         返回: (success: bool, conflict_course_info: dict or None)
         """
@@ -1422,37 +1422,25 @@ class MultiGrabWorker(QThread):
                 self._logger.info(f"换课可能成功: {course_name}")
                 return True, conflict_course
         
-        # Step 5: 选课失败，进入紧急救援模式 - 亡命回滚
+        # Step 5: 选课失败，进入紧急救援模式 - 亡命回滚（直到成功）
         self.status.emit(f"[换课] Step 5: 选课失败({msg})，进入紧急救援模式...")
         self._logger.warning(f"选课失败: {course_name}, 原因: {msg}, 开始亡命回滚")
         
         # 紧急救援参数
-        DESPERATE_RECOVERY_DURATION = 3600  # 1小时 = 3600秒
         RETRY_INTERVAL = 0.7  # 0.7秒间隔（高频但不过分）
-        
-        rollback_start_time = time.time()
+
         attempt_count = 0
-        
-        self.status.emit(f"[紧急救援] 🚨 开始死磕回滚 {conflict_name}，持续1小时...")
+
+        self.status.emit(f"[紧急救援] 🚨 开始死磕回滚 {conflict_name}，直到成功为止...")
         self._logger.error(f"进入紧急救援模式: 尝试抢回 {conflict_name}")
         
         while self._running:
-            elapsed = time.time() - rollback_start_time
-            
-            # 超时检查
-            if elapsed >= DESPERATE_RECOVERY_DURATION:
-                self.status.emit(f"[紧急救援] ⚠️ 超时1小时，停止回滚。请手动检查 {conflict_name}")
-                self._logger.error(f"紧急救援超时: {conflict_name}, 尝试次数: {attempt_count}")
-                return False, conflict_course
-            
             attempt_count += 1
-            remaining = int(DESPERATE_RECOVERY_DURATION - elapsed)
             
             # 每10次尝试更新一次状态（减少UI刷新）
             if attempt_count % 10 == 1:
                 self.status.emit(
-                    f"[紧急救援] 🔄 第{attempt_count}次尝试抢回 {conflict_name} "
-                    f"(剩余{remaining}秒)"
+                    f"[紧急救援] 🔄 第{attempt_count}次尝试抢回 {conflict_name}"
                 )
             
             # 尝试选回旧课

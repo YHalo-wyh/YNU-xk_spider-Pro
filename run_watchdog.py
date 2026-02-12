@@ -31,7 +31,7 @@ def get_base_dir():
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
     else:
-        return os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+        return os.path.abspath(os.path.dirname(__file__))
 
 
 def get_paths():
@@ -40,14 +40,14 @@ def get_paths():
     if getattr(sys, 'frozen', False):
         # 打包模式：使用相对路径（与主程序一致）
         return {
-            'state': os.path.join(base, 'xk_spider', 'monitor_state.json'),
+            'signal': os.path.join(base, 'xk_spider', 'watchdog_signal.json'),
             'lock': os.path.join(base, 'xk_spider', 'watchdog.lock'),
             'log_dir': os.path.join(base, 'logs'),
             'main_exe': os.path.join(base, 'YNU选课助手Pro.exe'),
         }
     else:
         return {
-            'state': os.path.join(base, 'xk_spider', 'monitor_state.json'),
+            'signal': os.path.join(base, 'xk_spider', 'watchdog_signal.json'),
             'lock': os.path.join(base, 'xk_spider', 'watchdog.lock'),
             'log_dir': os.path.join(base, 'logs'),
             'main_exe': os.path.join(base, 'run_gui.py'),
@@ -150,20 +150,41 @@ def remove_lock():
         pass
 
 
-def load_state():
-    """加载监控状态"""
+def load_signal():
+    """加载 watchdog 信号文件"""
     try:
         paths = get_paths()
-        if os.path.exists(paths['state']):
-            with open(paths['state'], 'r', encoding='utf-8') as f:
-                state = json.load(f)
-            # 状态超过2小时视为无效
-            if time.time() - state.get('timestamp', 0) > 7200:
-                return None
-            return state
-    except Exception:
-        pass
+        signal_file = paths.get('signal')
+        if signal_file and os.path.exists(signal_file):
+            with open(signal_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception as e:
+        log(f"读取信号文件失败: {e}")
     return None
+
+
+def save_signal(signal_data):
+    """写回 watchdog 信号文件"""
+    try:
+        paths = get_paths()
+        signal_file = paths.get('signal')
+        if not signal_file:
+            return
+        os.makedirs(os.path.dirname(signal_file), exist_ok=True)
+        with open(signal_file, 'w', encoding='utf-8') as f:
+            json.dump(signal_data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log(f"写入信号文件失败: {e}")
+
+
+def should_continue_guarding():
+    """根据信号文件判断是否继续守护"""
+    signal = load_signal()
+    if not signal:
+        return False
+
+    action = str(signal.get('action', '')).lower()
+    return action == 'start'
 
 
 def start_main():
@@ -207,6 +228,11 @@ def main_loop(main_pid):
     while True:
         try:
             time.sleep(CHECK_INTERVAL)
+
+            # 信号文件判断：只有 action=start 才继续守护
+            if not should_continue_guarding():
+                log("检测到 stop/无效信号，守护进程退出")
+                break
             
             # 检查主程序是否存活
             if psutil.pid_exists(main_pid):
@@ -219,11 +245,10 @@ def main_loop(main_pid):
             
             # 主程序已退出
             log(f"检测到主程序 (PID: {main_pid}) 已退出")
-            
-            # 检查是否需要重启
-            state = load_state()
-            if not state or not state.get('is_monitoring'):
-                log("监控状态为非活跃，守护进程退出")
+
+            # 再次检查信号（避免退出和重启之间的竞态）
+            if not should_continue_guarding():
+                log("检测到 stop 信号，取消重启并退出")
                 break
             
             # 检查重启频率（防止无限重启）
@@ -244,6 +269,13 @@ def main_loop(main_pid):
             if new_pid:
                 main_pid = new_pid
                 restart_times.append(now)
+
+                # 更新信号文件中的 pid，便于外部诊断
+                signal = load_signal() or {}
+                signal['action'] = 'start'
+                signal['pid'] = new_pid
+                signal['updated_at'] = time.time()
+                save_signal(signal)
             else:
                 log("重启失败，退出守护")
                 break
@@ -273,6 +305,12 @@ def main():
                 return
         else:
             log("未提供主程序 PID")
+            remove_lock()
+            return
+
+        # 仅在 start 信号下进入守护
+        if not should_continue_guarding():
+            log("启动时未检测到 start 信号，守护进程退出")
             remove_lock()
             return
         

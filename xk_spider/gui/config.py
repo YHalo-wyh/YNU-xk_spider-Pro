@@ -45,6 +45,9 @@ BASE_URL = "https://xk.ynu.edu.cn/xsxkapp/sys/xsxkapp"
 # 监控状态文件路径（用于闪退恢复）
 MONITOR_STATE_FILE = "xk_spider/monitor_state.json"
 
+# Watchdog 信号文件路径（用于守护进程启停控制）
+WATCHDOG_SIGNAL_FILE = "xk_spider/watchdog_signal.json"
+
 
 def get_api_endpoint(course_type):
     """获取课程类型对应的 API 端点"""

@@ -5,6 +5,8 @@ Modern Dark Dashboard 风格 (Catppuccin Mocha 配色)
 import os
 import json
 import time
+import sys
+import subprocess
 
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -17,8 +19,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, pyqtProperty, QUrl
 from PyQt5.QtGui import QFont, QPainter, QColor, QTextCursor, QDesktopServices, QIcon
 
-from .config import COURSE_TYPES, COURSE_NAME_TO_TYPE, parse_int, MONITOR_STATE_FILE
-from .utils import OCR_AVAILABLE
+from .config import COURSE_TYPES, COURSE_NAME_TO_TYPE, parse_int, MONITOR_STATE_FILE, WATCHDOG_SIGNAL_FILE
 from .workers import LoginWorker, MultiGrabWorker, CourseFetchWorker, UpdateCheckWorker
 from .logger import get_logger
 
@@ -360,8 +361,10 @@ class CourseCard(QFrame):
         is_full = self.course_data.get('isFull', False)
         
         # 状态标签
-        if is_chosen or is_full:
+        if is_chosen or is_full or is_conflict:
             status_layout = QHBoxLayout()
+            status_layout.setSpacing(8)
+
             if is_chosen:
                 status_label = QLabel("✓ 已选")
                 status_label.setStyleSheet(f"""
@@ -370,15 +373,28 @@ class CourseCard(QFrame):
                     background-color: {Colors.GREEN}; 
                     padding: 4px 12px; border-radius: 12px;
                 """)
+                status_layout.addWidget(status_label)
             else:
-                status_label = QLabel("已满")
-                status_label.setStyleSheet(f"""
-                    font-size: 13px; font-weight: bold; 
-                    color: {Colors.CRUST}; 
-                    background-color: {Colors.RED}; 
-                    padding: 4px 12px; border-radius: 12px;
-                """)
-            status_layout.addWidget(status_label)
+                if is_full:
+                    full_label = QLabel("已满")
+                    full_label.setStyleSheet(f"""
+                        font-size: 13px; font-weight: bold; 
+                        color: {Colors.CRUST}; 
+                        background-color: {Colors.RED}; 
+                        padding: 4px 12px; border-radius: 12px;
+                    """)
+                    status_layout.addWidget(full_label)
+
+                if is_conflict:
+                    conflict_label = QLabel("冲突")
+                    conflict_label.setStyleSheet(f"""
+                        font-size: 13px; font-weight: bold; 
+                        color: {Colors.CRUST}; 
+                        background-color: {Colors.YELLOW}; 
+                        padding: 4px 12px; border-radius: 12px;
+                    """)
+                    status_layout.addWidget(conflict_label)
+
             status_layout.addStretch()
             layout.addLayout(status_layout)
         
@@ -545,7 +561,7 @@ class MainWindow(QMainWindow):
     """主窗口 - Modern Dark Dashboard"""
     
     # 版本信息
-    VERSION = "v1.8.0"
+    VERSION = "v1.9.0"
     GITHUB_URL = "https://github.com/YHalo-wyh/YNU-xk_spider-Pro"
     
     def __init__(self):
@@ -560,6 +576,11 @@ class MainWindow(QMainWindow):
         self._api_courses_grouped = {}
         self._pending_monitor_courses = []
         self._is_searching = False
+        self._current_search_keyword = ''
+        self._showing_search_empty_state = False
+        self._is_manual_login_attempt = False
+        self._manual_login_fail_count = 0
+        self._auto_relogin_retry_count = 0
         
         # Server酱配置
         self.serverchan_enabled = False
@@ -698,7 +719,7 @@ class MainWindow(QMainWindow):
         login_glow.setColor(QColor(Colors.BLUE))
         login_glow.setOffset(0, 0)
         self.login_btn.setGraphicsEffect(login_glow)
-        self.login_btn.clicked.connect(self.login)
+        self.login_btn.clicked.connect(self.on_manual_login_clicked)
         login_layout.addWidget(self.login_btn)
         
         self.logout_btn = QPushButton("退出登录")
@@ -1458,6 +1479,56 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def write_watchdog_signal(self, action, pid=None):
+        """写入 watchdog 信号文件"""
+        signal_data = {
+            'action': action,
+            'timestamp': time.time(),
+        }
+        if pid is not None:
+            signal_data['pid'] = pid
+
+        try:
+            os.makedirs(os.path.dirname(WATCHDOG_SIGNAL_FILE), exist_ok=True)
+            with open(WATCHDOG_SIGNAL_FILE, 'w', encoding='utf-8') as f:
+                json.dump(signal_data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            self._logger.error(f"写入 watchdog 信号失败: {e}")
+
+    def start_watchdog_process(self):
+        """按需启动守护进程（开始监控时调用）"""
+        try:
+            main_pid = os.getpid()
+
+            if getattr(sys, 'frozen', False):
+                base_dir = os.path.dirname(sys.executable)
+                watchdog_exe = os.path.join(base_dir, 'Watchdog.exe')
+                if not os.path.exists(watchdog_exe):
+                    self._logger.warning(f"Watchdog.exe 不存在: {watchdog_exe}")
+                    return
+
+                subprocess.Popen(
+                    [watchdog_exe, str(main_pid)],
+                    creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW,
+                    start_new_session=True,
+                    cwd=base_dir
+                )
+            else:
+                base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+                watchdog_script = os.path.join(base_dir, 'run_watchdog.py')
+                if not os.path.exists(watchdog_script):
+                    self._logger.warning(f"run_watchdog.py 不存在: {watchdog_script}")
+                    return
+
+                subprocess.Popen(
+                    [sys.executable, watchdog_script, str(main_pid)],
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0,
+                    start_new_session=True,
+                    cwd=base_dir
+                )
+        except Exception as e:
+            self._logger.error(f"启动 watchdog 失败: {e}")
+
     def _auto_login_for_restore(self):
         """闪退恢复时自动登录"""
         username = self.username_input.text().strip()
@@ -1470,6 +1541,12 @@ class MainWindow(QMainWindow):
             return
         
         self.log("[INFO] 正在自动登录以恢复监控...")
+        self._is_manual_login_attempt = False
+        self.login()
+
+    def on_manual_login_clicked(self):
+        """用户主动点击一键登录"""
+        self._is_manual_login_attempt = True
         self.login()
 
     def login(self):
@@ -1478,10 +1555,7 @@ class MainWindow(QMainWindow):
         
         if not username or not password:
             QMessageBox.warning(self, "提示", "请输入学号和密码")
-            return
-        
-        if not OCR_AVAILABLE:
-            QMessageBox.warning(self, "错误", "OCR模块(ddddocr)未安装，无法使用纯API模式\n\n请安装: pip install ddddocr")
+            self._is_manual_login_attempt = False
             return
         
         self.save_config()
@@ -1503,6 +1577,9 @@ class MainWindow(QMainWindow):
         self.student_code = student_code
         self.campus = campus  # 保存校区代码
         self.is_logged_in = True
+        self._is_manual_login_attempt = False
+        self._manual_login_fail_count = 0
+        self._auto_relogin_retry_count = 0
         
         # 显示校区信息
         campus_name = "呈贡校区" if campus == "02" else "东陆校区" if campus == "01" else f"校区{campus}"
@@ -1539,12 +1616,7 @@ class MainWindow(QMainWindow):
                         break
                 
                 if not exists:
-                    course_name = course.get('KCM', '')
-                    teacher = course.get('SKJS', '')
-                    is_conflict = course.get('isConflict', False)
-                    display_text = f"{course_name} - {teacher}"
-                    if is_conflict:
-                        display_text += " ⚠️"
+                    display_text = self._build_grab_item_text(course)
                     
                     item = QListWidgetItem(display_text)
                     item.setData(Qt.UserRole, course)
@@ -1567,7 +1639,18 @@ class MainWindow(QMainWindow):
         self.login_btn.setText("🚀 一键登录")
         self.progress_bar.setVisible(False)
         self.log(f"[ERROR] 登录失败: {msg}")
-        QMessageBox.warning(self, "登录失败", msg)
+
+        if self._is_manual_login_attempt:
+            self._manual_login_fail_count += 1
+            remain = 5 - self._manual_login_fail_count
+            if remain > 0:
+                self.statusBar().showMessage(f"登录失败，已连续失败 {self._manual_login_fail_count} 次")
+                self.log(f"[WARN] 手动登录连续失败 {self._manual_login_fail_count} 次")
+            else:
+                QMessageBox.warning(self, "登录失败", "连续登录失败 5 次，可能是用户名或密码错误，请检查后重试")
+                self._manual_login_fail_count = 0
+
+        self._is_manual_login_attempt = False
     
     def logout(self):
         self.poll_timer.stop()
@@ -1622,6 +1705,7 @@ class MainWindow(QMainWindow):
         internal_type = COURSE_NAME_TO_TYPE.get(course_type_name, 'recommend')
         
         search_keyword = keyword if keyword else self.search_input.text().strip()
+        self._current_search_keyword = search_keyword
         
         # 记录当前请求的课程类型（用于回调时校验）
         self._current_fetch_type = course_type_name
@@ -1717,15 +1801,42 @@ class MainWindow(QMainWindow):
                     self.log("[API] 监控中检测到 session 问题，等待自动重登...")
                 else:
                     self.poll_timer.stop()
-                    self.logout()
-                    QMessageBox.warning(self, "会话过期", "登录已过期，请重新登录")
+                    self.log("[WARN] 检测到会话过期，开始自动重登...")
+                    self._auto_relogin_and_resume()
             return
         
         # 成功获取，重置计数器
         self._fetch_retry_count = 0
         self._fetch_fail_count = 0
+
+        # 本地搜索过滤：仅匹配课程名/教师名
+        search_keyword = self._current_search_keyword.strip().lower() if self._current_search_keyword else ''
+        if search_keyword and courses_grouped:
+            filtered_grouped = {}
+            for grouped_course_name, tc_list in courses_grouped.items():
+                grouped_course_name_lower = str(grouped_course_name or '').lower()
+                matched_tc_list = []
+
+                for tc in tc_list or []:
+                    teacher_name = str(tc.get('SKJS', '') or '').lower()
+                    tc_course_name = str(tc.get('KCM', '') or '').lower()
+
+                    if (search_keyword in grouped_course_name_lower
+                            or search_keyword in tc_course_name
+                            or search_keyword in teacher_name):
+                        matched_tc_list.append(tc)
+
+                if matched_tc_list:
+                    filtered_grouped[grouped_course_name] = matched_tc_list
+
+            courses_grouped = filtered_grouped
         
         if courses_grouped:
+            if self._showing_search_empty_state:
+                self.clear_cards()
+                self.schedule_title.setText("📅 选择课程查看教学班")
+                self._showing_search_empty_state = False
+
             self._api_courses_grouped = courses_grouped
             
             current_names = set(self._api_courses_grouped.keys())
@@ -1746,8 +1857,13 @@ class MainWindow(QMainWindow):
                 self.log(f"[API] 获取到 {len(self._api_courses_grouped)} 门课程")
         else:
             if not silent:
-                self.course_count_label.setText("共 0 门课程")
-                self.statusBar().showMessage("未找到匹配的课程")
+                if self._is_searching and search_keyword:
+                    self.course_count_label.setText("未找到结果")
+                    self.statusBar().showMessage("未找到结果")
+                    self.show_search_empty_state(self._current_search_keyword)
+                else:
+                    self.course_count_label.setText("共 0 门课程")
+                    self.statusBar().showMessage("未找到匹配的课程")
     
     def on_course_type_changed(self, text):
         """课程类型切换 - 强制刷新"""
@@ -1803,6 +1919,22 @@ class MainWindow(QMainWindow):
             child = self.cards_layout.takeAt(0)
             if child.widget():
                 child.widget().deleteLater()
+
+    def show_search_empty_state(self, keyword):
+        """显示搜索空结果状态"""
+        self.clear_cards()
+        self.schedule_title.setText("📅 未找到结果")
+
+        empty_label = QLabel(f"未找到结果：{keyword}")
+        empty_label.setAlignment(Qt.AlignCenter)
+        empty_label.setStyleSheet(f"""
+            font-size: 16px;
+            font-weight: bold;
+            color: {Colors.OVERLAY0};
+            padding: 30px 0;
+        """)
+        self.cards_layout.addWidget(empty_label, 0, 0, 1, 2)
+        self._showing_search_empty_state = True
     
     def show_course_cards(self, course_name, tc_list):
         self.clear_cards()
@@ -1815,6 +1947,36 @@ class MainWindow(QMainWindow):
             row = i // 2
             col = i % 2
             self.cards_layout.addWidget(card, row, col)
+
+    def _to_bool(self, value):
+        """统一布尔解析，兼容 0/1、true/false、yes/no 等字符串"""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {'1', 'true', 'yes', 'y', 'on'}:
+                return True
+            if normalized in {'0', 'false', 'no', 'n', 'off', ''}:
+                return False
+        return bool(value)
+
+    def _build_grab_item_text(self, course):
+        """构建待抢列表显示文本，图标顺序：冲突 -> 已满"""
+        course_name = course.get('KCM', '')
+        teacher = course.get('SKJS', '')
+
+        is_conflict = self._to_bool(course.get('isConflict', False))
+        is_full = self._to_bool(course.get('isFull', False))
+
+        display_text = f"{course_name} - {teacher}"
+        if is_conflict:
+            display_text += " ⚠️"
+        if is_full:
+            display_text += " 🔴"
+
+        return display_text
     
     def add_to_grab_list(self, course):
         tc_id = course.get('JXBID', '')
@@ -1827,13 +1989,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "提示", f"课程已在待抢列表中")
                 return
         
-        is_conflict = course.get('isConflict', False)
-        is_full = course.get('isFull', False)
-        display_text = f"{course_name} - {teacher}"
-        if is_conflict:
-            display_text += " ⚠️"
-        if is_full:
-            display_text += " 🔴"
+        display_text = self._build_grab_item_text(course)
         
         item = QListWidgetItem(display_text)
         item.setData(Qt.UserRole, course)
@@ -1914,9 +2070,13 @@ class MainWindow(QMainWindow):
         self.multi_grab_worker.session_updated.connect(self.on_session_updated)
         self.multi_grab_worker.finished.connect(self.on_worker_finished)
         self.multi_grab_worker.heartbeat.connect(self.update_heartbeat)
+
+        # 写入守护信号并按需启动 watchdog
+        self.write_watchdog_signal('start', pid=os.getpid())
+        self.start_watchdog_process()
         
         self.multi_grab_worker.start()
-        
+
         # 立即保存监控状态（即使程序崩溃也能恢复）
         self.save_monitor_state(is_monitoring=True)
         
@@ -1961,6 +2121,7 @@ class MainWindow(QMainWindow):
         
         # 只有用户主动停止时才清除状态文件
         if clear_state:
+            self.write_watchdog_signal('stop')
             self.clear_monitor_state()
     
     def on_grab_success(self, msg, course):
@@ -2051,9 +2212,9 @@ class MainWindow(QMainWindow):
         
         if not username or not password:
             self.log("[ERROR] 无法自动重登：缺少用户名或密码")
-            QMessageBox.warning(self, "重登失败", "请手动重新登录")
             return
         
+        self._is_manual_login_attempt = False
         self.log("[INFO] 开始自动重登...")
         self.login_btn.setEnabled(False)
         self.login_btn.setText("自动重登中...")
@@ -2071,8 +2232,11 @@ class MainWindow(QMainWindow):
         self.login_btn.setText("🚀 一键登录")
         self.progress_bar.setVisible(False)
         self.log(f"[ERROR] 自动重登失败: {msg}")
-        QMessageBox.warning(self, "自动重登失败", f"{msg}\n\n请手动重新登录")
-        self._pending_monitor_courses = []
+        self._auto_relogin_retry_count += 1
+        retry_delay_ms = min(10000, 2000 * self._auto_relogin_retry_count)
+        self.log(f"[INFO] {retry_delay_ms // 1000}s 后自动重试重登 (第 {self._auto_relogin_retry_count} 次)")
+        self.statusBar().showMessage("自动重登失败，正在重试...")
+        QTimer.singleShot(retry_delay_ms, self._auto_relogin_and_resume)
     
     def _resume_monitoring(self):
         if not self._pending_monitor_courses:
@@ -2090,12 +2254,7 @@ class MainWindow(QMainWindow):
                     break
             
             if not exists:
-                course_name = course.get('KCM', '')
-                teacher = course.get('SKJS', '')
-                is_conflict = course.get('isConflict', False)
-                display_text = f"{course_name} - {teacher}"
-                if is_conflict:
-                    display_text += " ⚠️"
+                display_text = self._build_grab_item_text(course)
                 
                 item = QListWidgetItem(display_text)
                 item.setData(Qt.UserRole, course)
