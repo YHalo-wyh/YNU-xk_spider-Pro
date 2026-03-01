@@ -235,7 +235,7 @@ class CourseFetchWorker(QThread):
 
 class LoginWorker(QThread):
     """纯API登录线程"""
-    success = pyqtSignal(str, str, str, str, str)  # cookies, token, batch_code, student_code, campus
+    success = pyqtSignal(str, str, str, str, str, str)  # cookies, token, batch_code, batch_name, student_code, campus
     failed = pyqtSignal(str)
     status = pyqtSignal(str)
     
@@ -266,8 +266,111 @@ class LoginWorker(QThread):
         except:
             self._server_time_offset = 0
     
+    def _as_true(self, value):
+        """兼容多种布尔字段格式"""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+        return False
+    
+    def _pick_first_text(self, data, keys):
+        """从多个候选键中提取第一个非空字符串"""
+        if not isinstance(data, dict):
+            return ''
+        for key in keys:
+            value = data.get(key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                return text
+        return ''
+    
+    def _pick_batch_from_item(self, batch_item):
+        """从轮次对象中提取 code/name"""
+        if not isinstance(batch_item, dict):
+            return '', ''
+        
+        code = self._pick_first_text(
+            batch_item, ('code', 'electiveBatchCode', 'batchCode', 'xklcdm')
+        )
+        name = self._pick_first_text(
+            batch_item, ('name', 'electiveBatchName', 'batchName', 'typeName')
+        )
+        return code, name
+    
+    def _pick_batch_from_list(self, batch_list):
+        """从轮次列表中选择当前可用轮次"""
+        if not isinstance(batch_list, list):
+            return '', ''
+        
+        items = [item for item in batch_list if isinstance(item, dict)]
+        if not items:
+            return '', ''
+        
+        # 优先：当前可选轮次
+        for item in items:
+            if self._as_true(item.get('canSelect')):
+                code, name = self._pick_batch_from_item(item)
+                if code:
+                    return code, name
+        
+        # 次优：当前激活/选中轮次
+        for item in items:
+            if any(self._as_true(item.get(k)) for k in (
+                'isCurrent', 'current', 'selected', 'isSelected', 'checked', 'active'
+            )):
+                code, name = self._pick_batch_from_item(item)
+                if code:
+                    return code, name
+        
+        # 兜底：列表中第一条有效轮次
+        for item in items:
+            code, name = self._pick_batch_from_item(item)
+            if code:
+                return code, name
+        
+        return '', ''
+    
+    def _extract_batch_from_payload(self, payload):
+        """从返回数据中提取轮次 code/name（兼容多种结构）"""
+        if not isinstance(payload, dict):
+            return '', ''
+        
+        # 结构1：直接字段
+        direct_code = self._pick_first_text(
+            payload, ('electiveBatchCode', 'batchCode', 'xklcdm', 'currentBatchCode')
+        )
+        direct_name = self._pick_first_text(
+            payload, ('electiveBatchName', 'batchName', 'currentBatchName')
+        )
+        if direct_code:
+            return direct_code, direct_name
+        
+        # 结构2：嵌套对象
+        for key in ('electiveBatch', 'currentBatch'):
+            batch_obj = payload.get(key)
+            code, name = self._pick_batch_from_item(batch_obj)
+            if code:
+                return code, name
+        
+        # 结构3：轮次列表
+        for key in ('electiveBatchList', 'batchList', 'dataList', 'electiveBatches'):
+            code, name = self._pick_batch_from_list(payload.get(key))
+            if code:
+                return code, name
+        
+        return '', ''
+    
     def _get_student_info(self, cookies, token, student_code):
-        """获取学生详细信息，提取校区代码"""
+        """获取学生详细信息，提取校区和轮次"""
+        campus = "02"
+        batch_code = ''
+        batch_name = ''
+        
         try:
             session = requests.Session()
             for key, value in cookies.items():
@@ -291,12 +394,104 @@ class LoginWorker(QThread):
                     data = result.get('data', {})
                     campus = data.get('campus', '02')  # 默认呈贡校区
                     campus_name = data.get('campusName', '未知')
+                    batch_code, batch_name = self._extract_batch_from_payload(data)
+                    
                     self.status.emit(f"✓ 校区: {campus_name}")
-                    return campus
-        except Exception as e:
-            self.status.emit(f"获取校区信息失败，使用默认值")
+                    if batch_code:
+                        if batch_name and batch_name != batch_code:
+                            self.status.emit(f"✓ 当前批次: {batch_name} ({batch_code})")
+                        else:
+                            self.status.emit(f"✓ 当前批次: {batch_code}")
+                    return campus, batch_code, batch_name
+        except Exception:
+            self.status.emit("获取学生信息失败，使用默认值")
         
-        return "02"  # 默认返回呈贡校区
+        return campus, batch_code, batch_name
+    
+    def _get_batch_from_batch_api(self, cookies, token):
+        """通过 /elective/batch.do 获取当前可用轮次"""
+        try:
+            session = requests.Session()
+            for key, value in cookies.items():
+                session.cookies.set(key, value)
+            
+            timestamp = str(self._get_server_timestamp())
+            resp = session.post(
+                f"{BASE_URL}/elective/batch.do?timestamp={timestamp}",
+                headers={
+                    "Accept": "application/json, text/javascript, */*; q=0.01",
+                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                    "X-Requested-With": "XMLHttpRequest",
+                    "token": token,
+                    "Referer": f"{BASE_URL}/*default/index.do",
+                },
+                data={},
+                timeout=(3, 8),
+                verify=False
+            )
+            
+            if resp.status_code != 200:
+                return '', ''
+            
+            result = resp.json()
+            batch_code, batch_name = self._extract_batch_from_payload(result)
+            if batch_code:
+                if batch_name and batch_name != batch_code:
+                    self.status.emit(f"✓ 轮次接口识别: {batch_name} ({batch_code})")
+                else:
+                    self.status.emit(f"✓ 轮次接口识别: {batch_code}")
+            return batch_code, batch_name
+        except Exception:
+            return '', ''
+    
+    def _confirm_batch_selection(self, cookies, token, student_code, batch_code):
+        """
+        确认选课轮次（对应前端 student/xklcqr.do）
+        某些轮次需要先确认，否则后续接口可能返回空列表或不可选。
+        """
+        if not student_code or not batch_code:
+            return
+        
+        try:
+            session = requests.Session()
+            for key, value in cookies.items():
+                session.cookies.set(key, value)
+            
+            resp = session.post(
+                f"{BASE_URL}/student/xklcqr.do",
+                headers={
+                    "Accept": "application/json, text/javascript, */*; q=0.01",
+                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                    "X-Requested-With": "XMLHttpRequest",
+                    "token": token,
+                    "Origin": "https://xk.ynu.edu.cn",
+                    "Referer": "https://xk.ynu.edu.cn/",
+                },
+                data={
+                    "electiveBatchCode": batch_code,
+                    "studentCode": student_code,
+                },
+                timeout=(3, 8),
+                verify=False
+            )
+            
+            if resp.status_code != 200:
+                self.status.emit(f"⚠️ 轮次确认 HTTP {resp.status_code}，继续登录")
+                return
+            
+            result = resp.json()
+            code = str(result.get('code', ''))
+            msg = str(result.get('msg', '') or '')
+            
+            if code == '1':
+                self.status.emit("✓ 轮次确认成功")
+            elif msg and any(k in msg for k in ("已确认", "无需确认", "已同意", "已选择")):
+                self.status.emit("✓ 轮次已确认")
+            elif msg:
+                self.status.emit(f"⚠️ 轮次确认返回: {msg}")
+        except Exception:
+            # 轮次确认失败不阻断登录，后续课程查询仍可能成功
+            self.status.emit("⚠️ 轮次确认失败，已继续登录")
     
     def _api_login_attempt(self):
         try:
@@ -403,11 +598,32 @@ class LoginWorker(QThread):
                     cookies_str = '; '.join([f"{k}={v}" for k, v in login_data['cookies'].items()])
                     student_code = login_data['number']
                     
-                    # 获取学生详细信息（包含校区）
+                    # 获取学生详细信息（包含校区和轮次）
                     self.status.emit("获取学生信息...")
-                    campus = self._get_student_info(login_data['cookies'], token, student_code)
+                    campus, batch_code, batch_name = self._get_student_info(
+                        login_data['cookies'], token, student_code
+                    )
                     
-                    self.success.emit(cookies_str, token, DEFAULT_BATCH_CODE, student_code, campus)
+                    # 兜底：如果学生信息中没有轮次，再调用批次接口
+                    if not batch_code:
+                        self.status.emit("检测当前选课轮次...")
+                        batch_code, batch_name = self._get_batch_from_batch_api(
+                            login_data['cookies'], token
+                        )
+                    
+                    # 最终兜底：使用默认批次（兼容旧逻辑）
+                    if not batch_code:
+                        batch_code = DEFAULT_BATCH_CODE
+                        self.status.emit("⚠️ 批次自动识别失败，已回退到默认批次")
+                    
+                    # 与网页端一致：确认当前轮次（第三轮常见必需步骤）
+                    self._confirm_batch_selection(
+                        login_data['cookies'], token, student_code, batch_code
+                    )
+                    
+                    self.success.emit(
+                        cookies_str, token, batch_code, batch_name, student_code, campus
+                    )
                     return
                 continue
                     

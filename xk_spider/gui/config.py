@@ -36,7 +36,7 @@ COURSE_NAME_TO_TYPE = {
     '体育课程': 'sport',
 }
 
-# 默认批次代码
+# 默认批次代码（仅在自动识别失败时兜底）
 DEFAULT_BATCH_CODE = "3d7ef3d38d4440a09b1ae65d3d7a04bc"
 
 # API 基础 URL

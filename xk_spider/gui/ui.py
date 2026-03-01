@@ -561,7 +561,7 @@ class MainWindow(QMainWindow):
     """主窗口 - Modern Dark Dashboard"""
     
     # 版本信息
-    VERSION = "v1.9.0"
+    VERSION = "v2.0.0"
     GITHUB_URL = "https://github.com/YHalo-wyh/YNU-xk_spider-Pro"
     
     def __init__(self):
@@ -569,6 +569,7 @@ class MainWindow(QMainWindow):
         self.is_logged_in = False
         self.token = ''
         self.batch_code = ''
+        self.batch_name = ''
         self.student_code = ''
         self.campus = '02'  # 默认呈贡校区
         self.cookies = ''
@@ -679,9 +680,9 @@ class MainWindow(QMainWindow):
         self.password_input.setFixedHeight(42)
         login_layout.addWidget(self.password_input)
         
-        batch_label = QLabel("📅 选课批次: 第二轮")
-        batch_label.setStyleSheet(f"color: {Colors.SUBTEXT0}; font-size: 13px; padding: 4px 0;")
-        login_layout.addWidget(batch_label)
+        self.batch_label = QLabel("📅 选课批次: 自动识别")
+        self.batch_label.setStyleSheet(f"color: {Colors.SUBTEXT0}; font-size: 13px; padding: 4px 0;")
+        login_layout.addWidget(self.batch_label)
         
         self.login_btn = QPushButton("🚀 一键登录")
         self.login_btn.setFixedHeight(44)
@@ -1570,10 +1571,11 @@ class MainWindow(QMainWindow):
         self.login_worker.status.connect(lambda msg: self.statusBar().showMessage(f"🔐 {msg}"))
         self.login_worker.start()
     
-    def on_login_success(self, cookies, token, batch_code, student_code, campus):
+    def on_login_success(self, cookies, token, batch_code, batch_name, student_code, campus):
         self.cookies = cookies
         self.token = token
         self.batch_code = batch_code
+        self.batch_name = batch_name or ''
         self.student_code = student_code
         self.campus = campus  # 保存校区代码
         self.is_logged_in = True
@@ -1593,7 +1595,12 @@ class MainWindow(QMainWindow):
         self.log(f"[SUCCESS] ✓ 登录成功！")
         self.log(f"[INFO] 校区: {campus_name} ({campus})")
         self.log(f"[INFO] Token: {token}")
-        self.log(f"[INFO] BatchCode: {batch_code}")
+        if self.batch_name and self.batch_name != self.batch_code:
+            self.batch_label.setText(f"📅 选课批次: {self.batch_name} ({self.batch_code})")
+            self.log(f"[INFO] Batch: {self.batch_name} ({self.batch_code})")
+        else:
+            self.batch_label.setText(f"📅 选课批次: {self.batch_code}")
+            self.log(f"[INFO] BatchCode: {self.batch_code}")
         self.statusBar().showMessage("✓ 纯API模式已就绪，课程列表自动刷新中...")
         
         # 优先从状态文件恢复（闪退恢复）
@@ -1660,9 +1667,11 @@ class MainWindow(QMainWindow):
         self.is_logged_in = False
         self.token = ''
         self.batch_code = ''
+        self.batch_name = ''
         self.student_code = ''
         self.campus = '02'  # 重置为默认
         self.cookies = ''
+        self.batch_label.setText("📅 选课批次: 自动识别")
         
         self.status_label.setText("● 未登录")
         self.status_label.setStyleSheet(f"color: {Colors.RED}; font-weight: bold; font-size: 13px;")
