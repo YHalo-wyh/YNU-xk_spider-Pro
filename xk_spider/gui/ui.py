@@ -561,7 +561,7 @@ class MainWindow(QMainWindow):
     """主窗口 - Modern Dark Dashboard"""
     
     # 版本信息
-    VERSION = "v2.0.0"
+    VERSION = "v2.1.0"
     GITHUB_URL = "https://github.com/YHalo-wyh/YNU-xk_spider-Pro"
     
     def __init__(self):
@@ -989,7 +989,7 @@ class MainWindow(QMainWindow):
                 color: {Colors.OVERLAY0};
             }}
         """)
-        self.stop_grab_btn.clicked.connect(self.stop_monitoring)
+        self.stop_grab_btn.clicked.connect(lambda _=False: self.stop_monitoring())
         self.stop_grab_btn.setEnabled(False)
         btn_layout.addWidget(self.stop_grab_btn)
         right_layout.addLayout(btn_layout)
@@ -1121,6 +1121,11 @@ class MainWindow(QMainWindow):
                 pass
         self.statusBar().showMessage("", 0)
     
+    def _format_version(self, version):
+        """统一版本号展示格式，避免出现 vv2.0.0"""
+        normalized = str(version or '').strip().lstrip('vV')
+        return f"v{normalized}" if normalized else "未知"
+    
     def _on_update_checked(self, has_update, latest_version, download_url, error):
         """更新检查完成回调"""
         # 关闭进度对话框
@@ -1136,8 +1141,11 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "检查更新", "暂无发布版本信息")
             return
         
+        current_text = self._format_version(self.VERSION)
+        latest_text = self._format_version(latest_version)
+        
         if has_update:
-            msg = f"发现新版本！\n\n当前版本: v{self.VERSION}\n最新版本: v{latest_version}"
+            msg = f"发现新版本！\n\n当前版本: {current_text}\n最新版本: {latest_text}"
             reply = QMessageBox.question(
                 self, "发现新版本", 
                 msg + "\n\n是否前往下载？",
@@ -1146,7 +1154,7 @@ class MainWindow(QMainWindow):
             if reply == QMessageBox.Yes:
                 QDesktopServices.openUrl(QUrl(download_url))
         else:
-            QMessageBox.information(self, "检查更新", f"当前已是最新版本 v{self.VERSION}")
+            QMessageBox.information(self, "检查更新", f"当前已是最新版本 {current_text}")
     
     def _show_about_dialog(self):
         """显示关于对话框"""
@@ -1663,7 +1671,8 @@ class MainWindow(QMainWindow):
         self.poll_timer.stop()
         self._is_searching = False
         
-        self.stop_monitoring()
+        was_monitoring = self.multi_grab_worker is not None
+        self.stop_monitoring(reason='logout')
         self.is_logged_in = False
         self.token = ''
         self.batch_code = ''
@@ -1683,7 +1692,8 @@ class MainWindow(QMainWindow):
         self.clear_cards()
         self._api_courses_grouped = {}
         
-        self.log("[INFO] 已退出登录")
+        if not was_monitoring:
+            self.log("[INFO] 已退出登录")
 
     def refresh_courses(self, keyword='', silent=False, force=False):
         """
@@ -2105,7 +2115,9 @@ class MainWindow(QMainWindow):
         """)
         self.statusBar().showMessage("🎯 监控中...")
     
-    def stop_monitoring(self, clear_state=True):
+    def stop_monitoring(self, clear_state=True, reason='manual'):
+        was_monitoring = self.multi_grab_worker is not None
+
         if self.multi_grab_worker:
             self.multi_grab_worker.stop()
             self.multi_grab_worker.wait(2000)
@@ -2125,8 +2137,24 @@ class MainWindow(QMainWindow):
                 margin: 2px 8px;
             }}
         """)
-        self.statusBar().showMessage("⏹ 监控已停止")
-        self.log("[INFO] 监控已停止")
+        if reason == 'logout':
+            if was_monitoring:
+                self.statusBar().showMessage("👋 已退出登录（监控已停止）")
+                self.log("[INFO] 已退出登录（监控已停止）")
+            else:
+                self.statusBar().showMessage("👋 已退出登录")
+        elif reason == 'relogin':
+            if was_monitoring:
+                self.statusBar().showMessage("🔐 会话过期，监控已暂停")
+                self.log("[WARN] 会话过期，监控已暂停，准备自动重登")
+            else:
+                self.statusBar().showMessage("🔐 会话过期，准备自动重登")
+        elif reason == 'close':
+            # 关闭程序时不追加停止日志，避免与手动停止混淆
+            pass
+        else:
+            self.statusBar().showMessage("⏹ 监控已停止")
+            self.log("[INFO] 监控已停止")
         
         # 只有用户主动停止时才清除状态文件
         if clear_state:
@@ -2207,7 +2235,7 @@ class MainWindow(QMainWindow):
             self._pending_monitor_courses = pending_courses
             self.log(f"[INFO] 已保存 {len(pending_courses)} 门待抢课程")
             
-            self.stop_monitoring()
+            self.stop_monitoring(reason='relogin')
             self._auto_relogin_and_resume()
         except Exception as e:
             try:
@@ -2300,6 +2328,6 @@ class MainWindow(QMainWindow):
         
         self.poll_timer.stop()
         # 关闭程序时不清除状态文件，让程序可以自动重启恢复
-        self.stop_monitoring(clear_state=False)
+        self.stop_monitoring(clear_state=False, reason='close')
         self.save_config()
         event.accept()

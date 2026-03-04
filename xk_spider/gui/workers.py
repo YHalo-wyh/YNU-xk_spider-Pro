@@ -16,7 +16,7 @@ from PyQt5.QtCore import QThread, pyqtSignal, QMutex, QMutexLocker
 
 from .config import (
     get_api_endpoint, get_course_type_code,
-    DEFAULT_BATCH_CODE, BASE_URL
+    BASE_URL
 )
 from .utils import create_ocr_instance, OCR_AVAILABLE, send_notification
 from .logger import get_logger
@@ -60,6 +60,12 @@ class UpdateCheckWorker(QThread):
         super().__init__()
         self.current_version = current_version
     
+    def _normalize_version(self, version):
+        """将版本号标准化为纯数字点号格式（例如 v2.1.0 -> 2.1.0）"""
+        if version is None:
+            return ''
+        return str(version).strip().lstrip('vV')
+    
     def run(self):
         try:
             with requests.Session() as session:
@@ -67,7 +73,7 @@ class UpdateCheckWorker(QThread):
                 
                 if resp.status_code == 200:
                     data = resp.json()
-                    latest_version = data.get('tag_name', '').lstrip('v')
+                    latest_version = self._normalize_version(data.get('tag_name', ''))
                     download_url = data.get('html_url', '')
                     release_notes = data.get('body', '')[:500]
                     
@@ -92,6 +98,9 @@ class UpdateCheckWorker(QThread):
     def _compare_versions(self, latest, current):
         """比较版本号，返回 True 表示有更新"""
         try:
+            latest = self._normalize_version(latest)
+            current = self._normalize_version(current)
+            
             def version_tuple(v):
                 return tuple(map(int, v.split('.')))
             return version_tuple(latest) > version_tuple(current)
@@ -327,12 +336,6 @@ class LoginWorker(QThread):
                 if code:
                     return code, name
         
-        # 兜底：列表中第一条有效轮次
-        for item in items:
-            code, name = self._pick_batch_from_item(item)
-            if code:
-                return code, name
-        
         return '', ''
     
     def _extract_batch_from_payload(self, payload):
@@ -404,9 +407,41 @@ class LoginWorker(QThread):
                             self.status.emit(f"✓ 当前批次: {batch_code}")
                     return campus, batch_code, batch_name
         except Exception:
-            self.status.emit("获取学生信息失败，使用默认值")
+            self.status.emit("获取学生信息失败，稍后重试")
         
         return campus, batch_code, batch_name
+    
+    def _detect_batch_with_retry(
+        self, cookies, token, student_code, max_attempts=5, retry_interval=0.6
+    ):
+        """
+        自动识别选课批次（无默认值回退）
+        识别顺序：student/{studentCode}.do -> elective/batch.do
+        失败则重试，返回 (campus, batch_code, batch_name)
+        """
+        campus = "02"
+        batch_code = ''
+        batch_name = ''
+        
+        for attempt in range(max_attempts):
+            self.status.emit(f"识别选课批次 ({attempt + 1}/{max_attempts})...")
+            
+            campus, batch_code, batch_name = self._get_student_info(
+                cookies, token, student_code
+            )
+            if batch_code:
+                return campus, batch_code, batch_name
+            
+            self.status.emit("学生信息未返回批次，尝试轮次接口识别...")
+            batch_code, batch_name = self._get_batch_from_batch_api(cookies, token)
+            if batch_code:
+                return campus, batch_code, batch_name
+            
+            if attempt < max_attempts - 1:
+                self.status.emit("批次自动识别失败，重试中...")
+                time.sleep(retry_interval)
+        
+        return campus, '', ''
     
     def _get_batch_from_batch_api(self, cookies, token):
         """通过 /elective/batch.do 获取当前可用轮次"""
@@ -598,23 +633,14 @@ class LoginWorker(QThread):
                     cookies_str = '; '.join([f"{k}={v}" for k, v in login_data['cookies'].items()])
                     student_code = login_data['number']
                     
-                    # 获取学生详细信息（包含校区和轮次）
-                    self.status.emit("获取学生信息...")
-                    campus, batch_code, batch_name = self._get_student_info(
+                    # 自动识别当前批次（失败重试，不再回退默认值）
+                    campus, batch_code, batch_name = self._detect_batch_with_retry(
                         login_data['cookies'], token, student_code
                     )
                     
-                    # 兜底：如果学生信息中没有轮次，再调用批次接口
                     if not batch_code:
-                        self.status.emit("检测当前选课轮次...")
-                        batch_code, batch_name = self._get_batch_from_batch_api(
-                            login_data['cookies'], token
-                        )
-                    
-                    # 最终兜底：使用默认批次（兼容旧逻辑）
-                    if not batch_code:
-                        batch_code = DEFAULT_BATCH_CODE
-                        self.status.emit("⚠️ 批次自动识别失败，已回退到默认批次")
+                        self.failed.emit("批次自动识别失败，请稍后重试登录")
+                        return
                     
                     # 与网页端一致：确认当前轮次（第三轮常见必需步骤）
                     self._confirm_batch_selection(
@@ -1495,9 +1521,9 @@ class MultiGrabWorker(QThread):
         """
         在已选课程中查找与目标课程时间冲突的课程
         策略：
-        1. 优先通过 conflictDesc 文本匹配（最可靠）
+        1. 优先通过 conflictDesc 严格全名匹配
         2. 其次通过时间比对
-        3. 最后通过课程名模糊匹配
+        3. 最后兜底：仅剩一门已选课程时返回该课程
         返回: {'id': tc_id, 'name': name, ...} 或 None
         """
         target_name = target_course.get('KCM', '')
@@ -1516,37 +1542,22 @@ class MultiGrabWorker(QThread):
         for sc in selected_courses:
             self._logger.debug(f"  - {sc['name']}: {sc['time']}")
         
-        # 策略1: 通过 conflictDesc 文本匹配（最可靠）
+        # 策略1: 通过 conflictDesc 严格全名匹配
         if conflict_desc:
-            self._logger.info("尝试通过 conflictDesc 匹配...")
-            
-            # 提取方括号中的内容 [课程名][班号]
-            bracket_matches = re.findall(r'\[([^\]]+)\]', conflict_desc)
-            self._logger.debug(f"conflictDesc 提取: {bracket_matches}")
-            
+            self._logger.info("尝试通过 conflictDesc 严格全名匹配...")
+            normalized_desc = re.sub(r'\s+', '', str(conflict_desc))
+
             for selected in selected_courses:
-                selected_name = selected.get('name', '')
-                
-                # 检查课程名是否出现在 conflictDesc 中
-                if selected_name and selected_name in conflict_desc:
-                    self._logger.info(f"通过 conflictDesc 直接匹配: {selected_name}")
+                selected_name = str(selected.get('name', '') or '')
+                normalized_name = re.sub(r'\s+', '', selected_name)
+                if not normalized_name:
+                    continue
+
+                # 严格全名匹配：避免“计算机网络”误命中“计算机网络实践”
+                pattern = rf'(?<![\u4e00-\u9fffA-Za-z0-9]){re.escape(normalized_name)}(?![\u4e00-\u9fffA-Za-z0-9])'
+                if re.search(pattern, normalized_desc):
+                    self._logger.info(f"通过 conflictDesc 严格全名匹配: {selected_name}")
                     return selected
-                
-                # 检查方括号内容是否匹配
-                for match in bracket_matches:
-                    if match and selected_name and (match in selected_name or selected_name in match):
-                        self._logger.info(f"通过 conflictDesc 方括号匹配: {selected_name} ~ {match}")
-                        return selected
-            
-            # 尝试更宽松的匹配：取课程名前几个字
-            for selected in selected_courses:
-                selected_name = selected.get('name', '')
-                if selected_name and len(selected_name) >= 2:
-                    # 取前4个字符进行模糊匹配
-                    prefix = selected_name[:4]
-                    if prefix in conflict_desc:
-                        self._logger.info(f"通过 conflictDesc 前缀匹配: {selected_name} (prefix={prefix})")
-                        return selected
         
         # 策略2: 通过时间比对
         if target_time:
@@ -1571,6 +1582,27 @@ class MultiGrabWorker(QThread):
         if selected is None:
             return None  # 查询失败
         return tc_id in selected
+    
+    def _verify_course_selected(self, tc_id, max_attempts=3, retry_interval=0.3):
+        """
+        带重试的选中核实
+        返回:
+        - True: 核实已选中
+        - False: 明确未选中
+        - None: 连续查询失败，无法核实
+        """
+        has_false = False
+        for i in range(max_attempts):
+            result = self._check_course_selected(tc_id)
+            if result is True:
+                return True
+            if result is False:
+                has_false = True
+            if i < max_attempts - 1:
+                time.sleep(retry_interval)
+        if has_false:
+            return False
+        return None
     
     def _handle_conflict_rollback(self, course):
         """
@@ -1625,18 +1657,17 @@ class MultiGrabWorker(QThread):
         
         if success:
             # Step 4: 核实
-            time.sleep(0.5)
-            is_selected = self._check_course_selected(tc_id)
+            is_selected = self._verify_course_selected(tc_id)
             
             if is_selected:
                 self.status.emit(f"[换课] Step 4: ✓ 换课成功！{conflict_name} → {course_name}")
                 self._logger.info(f"换课成功: {conflict_name} → {course_name}")
                 return True, conflict_course
             elif is_selected is None:
-                # 查询失败，但选课返回成功，认为成功
-                self.status.emit(f"[换课] Step 4: 选课成功（核实查询失败）")
-                self._logger.info(f"换课可能成功: {course_name}")
-                return True, conflict_course
+                # 必须核实成功才视为成功，查询失败时不发成功通知，也不触发回滚
+                self.status.emit(f"[换课] Step 4: 核实查询失败，暂不判定成功，继续监控")
+                self._logger.warning(f"换课核实失败，暂不判定成功: {course_name}")
+                return False, conflict_course
         
         # Step 5: 选课失败，进入紧急救援模式 - 亡命回滚（直到成功）
         self.status.emit(f"[换课] Step 5: 选课失败({msg})，进入紧急救援模式...")
@@ -1670,10 +1701,9 @@ class MultiGrabWorker(QThread):
             
             if rollback_success:
                 # 核实是否真的选上了
-                time.sleep(0.3)
-                is_selected = self._check_course_selected(conflict_tc_id)
+                is_selected = self._verify_course_selected(conflict_tc_id)
                 
-                if is_selected or is_selected is None:
+                if is_selected is True:
                     self.status.emit(f"[紧急救援] ✓ 成功抢回 {conflict_name}！(尝试{attempt_count}次)")
                     self._logger.info(f"紧急救援成功: {conflict_name}, 尝试次数: {attempt_count}")
                     return False, conflict_course
@@ -1982,8 +2012,8 @@ class MultiGrabWorker(QThread):
                 
                 if success:
                     # 核实
-                    time.sleep(0.3)
-                    if self._check_course_selected(tc_id) is not False:
+                    is_selected = self._verify_course_selected(tc_id)
+                    if is_selected is True:
                         self.success.emit(f"🎉 抢课成功: {course_name} - {teacher}", course)
                         # Server酱通知：抢课成功
                         if self.serverchan_key:
@@ -1995,7 +2025,10 @@ class MultiGrabWorker(QThread):
                         self._remove_course_safe(tc_id)
                         break
                     else:
-                        self.status.emit(f"[WARN] 选课返回成功但核实失败，继续监控...")
+                        if is_selected is None:
+                            self.status.emit(f"[WARN] 选课返回成功但核实查询失败，暂不发送成功通知，继续监控...")
+                        else:
+                            self.status.emit(f"[WARN] 选课返回成功但核实未选中，继续监控...")
                 
                 elif msg == "session_expired":
                     self.need_relogin.emit()
@@ -2112,7 +2145,7 @@ class MultiGrabWorker(QThread):
         for t in threads:
             t.join(timeout=2)
         
-        self.status.emit("[INFO] 监控已停止")
+        # 停止日志由 UI 统一输出，避免重复“监控已停止”
     
     def _health_check_loop(self):
         """
