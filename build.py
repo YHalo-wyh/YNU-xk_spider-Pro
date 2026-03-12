@@ -6,6 +6,11 @@ import sys
 import shutil
 import subprocess
 
+APP_VERSION = "v2.2.0"
+ARTIFACT_PREFIX = f"YNU.Pro_{APP_VERSION}"
+SETUP_FILENAME = f"{ARTIFACT_PREFIX}_Setup.exe"
+PORTABLE_FILENAME = f"{ARTIFACT_PREFIX}_Portable.zip"
+
 def check_and_install(package):
     """检查并安装包"""
     try:
@@ -71,8 +76,8 @@ def build_exe():
         if f.endswith(".spec"):
             os.remove(f)
     
-    # PyInstaller 参数 - 打包所有依赖
-    args = [
+    # PyInstaller 参数 - 打包主程序
+    main_args = [
         "run_gui.py",
         "--name=YNU选课助手Pro",
         "--onedir",            # 打包到一个目录（比onefile快且稳定）
@@ -103,29 +108,63 @@ def build_exe():
     
     # 如果有 .ico 图标文件，设置为 EXE 图标
     if os.path.exists("assets/icon.ico"):
-        args.append("--icon=assets/icon.ico")
+        main_args.append("--icon=assets/icon.ico")
     elif os.path.exists("icon.ico"):
-        args.append("--icon=icon.ico")
+        main_args.append("--icon=icon.ico")
         
     # 添加 UPX 参数
     if upx_dir:
-        args.append(f"--upx-dir={upx_dir}")
+        main_args.append(f"--upx-dir={upx_dir}")
 
     
-    print("[*] 正在打包，请稍候（可能需要几分钟）...")
+    print("[*] 正在打包主程序，请稍候（可能需要几分钟）...")
     
     from PyInstaller.__main__ import run
-    run(args)
+    run(main_args)
     
-    if os.path.exists("dist/YNU选课助手Pro"):
-        print("[OK] EXE 打包成功！")
-        return True
-    else:
+    main_dist_dir = "dist/YNU选课助手Pro"
+    if not os.path.exists(main_dist_dir):
         print("[ERROR] 打包失败")
         return False
 
+    print("[*] 正在打包守护进程 Watchdog.exe...")
+    watchdog_args = [
+        "run_watchdog.py",
+        "--name=Watchdog",
+        "--onefile",           # 守护进程仅需单文件，便于主程序直接调用
+        "--windowed",          # 无控制台
+        "--noconfirm",
+        "--clean",
+    ]
+
+    if os.path.exists("assets/icon.ico"):
+        watchdog_args.append("--icon=assets/icon.ico")
+    elif os.path.exists("icon.ico"):
+        watchdog_args.append("--icon=icon.ico")
+
+    if upx_dir:
+        watchdog_args.append(f"--upx-dir={upx_dir}")
+
+    run(watchdog_args)
+
+    watchdog_exe = "dist/Watchdog.exe"
+    target_watchdog_exe = os.path.join(main_dist_dir, "Watchdog.exe")
+    if not os.path.exists(watchdog_exe):
+        print("[ERROR] Watchdog.exe 打包失败")
+        return False
+
+    shutil.copy2(watchdog_exe, target_watchdog_exe)
+    os.remove(watchdog_exe)
+
+    if not os.path.exists(target_watchdog_exe):
+        print("[ERROR] Watchdog.exe 复制失败")
+        return False
+
+    print("[OK] EXE 打包成功（已包含 Watchdog.exe）！")
+    return True
+
 def create_installer():
-    """创建安装包（使用 NSIS 或简单的自解压包）"""
+    """创建安装包与便携版 ZIP"""
     print("\n" + "=" * 50)
     print("步骤 2: 创建安装包")
     print("=" * 50)
@@ -136,11 +175,11 @@ def create_installer():
         return False
     
     # 创建 NSIS 安装脚本
-    nsis_script = """
+    nsis_script = f"""
 !include "MUI2.nsh"
 
 Name "YNU选课助手 Pro"
-OutFile "YNU选课助手Pro_Setup.exe"
+OutFile "{SETUP_FILENAME}"
 InstallDir "$LOCALAPPDATA\\YNU选课助手Pro"
 RequestExecutionLevel user
 
@@ -193,27 +232,32 @@ SectionEnd
             nsis_path = p
             break
     
+    setup_created = False
     if nsis_path:
         print("[*] 使用 NSIS 创建安装包...")
         try:
             subprocess.run([nsis_path, "installer.nsi"], check=True)
-            if os.path.exists("YNU选课助手Pro_Setup.exe"):
-                shutil.move("YNU选课助手Pro_Setup.exe", "dist/YNU选课助手Pro_Setup.exe")
-                print("[OK] 安装包创建成功: dist/YNU选课助手Pro_Setup.exe")
-                return True
+            if os.path.exists(SETUP_FILENAME):
+                shutil.move(SETUP_FILENAME, os.path.join("dist", SETUP_FILENAME))
+                print(f"[OK] 安装包创建成功: dist/{SETUP_FILENAME}")
+                setup_created = True
         except Exception as e:
             print(f"[WARN] NSIS 打包失败: {e}")
-    
-    # 如果没有 NSIS，创建 ZIP 便携版
+
+    # 始终创建 ZIP 便携版
     print("[*] 创建 ZIP 便携版...")
-    shutil.make_archive("dist/YNU选课助手Pro_Portable", "zip", "dist", "YNU选课助手Pro")
-    print("[OK] 便携版创建成功: dist/YNU选课助手Pro_Portable.zip")
-    
-    # 提示安装 NSIS
-    print("\n[提示] 如需创建安装包，请安装 NSIS:")
-    print("       下载地址: https://nsis.sourceforge.io/Download")
-    print("       安装后重新运行此脚本即可生成安装包")
-    
+    portable_basename = os.path.join("dist", f"{ARTIFACT_PREFIX}_Portable")
+    portable_zip_path = f"{portable_basename}.zip"
+    if os.path.exists(portable_zip_path):
+        os.remove(portable_zip_path)
+    shutil.make_archive(portable_basename, "zip", "dist", "YNU选课助手Pro")
+    print(f"[OK] 便携版创建成功: dist/{PORTABLE_FILENAME}")
+
+    if not setup_created:
+        print("\n[提示] 未生成安装包（NSIS 不可用或打包失败）:")
+        print("       下载地址: https://nsis.sourceforge.io/Download")
+        print("       安装后重新运行此脚本即可生成安装包")
+
     return True
 
 def main():
@@ -222,7 +266,7 @@ def main():
     print("=" * 50)
     print("\n此脚本将：")
     print("1. 将程序打包为独立 EXE（包含所有依赖）")
-    print("2. 创建安装包或便携版 ZIP")
+    print("2. 同时创建安装包和便携版 ZIP")
     print("\n按 Enter 开始，Ctrl+C 取消...")
     
     try:

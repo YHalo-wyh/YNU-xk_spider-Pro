@@ -9,6 +9,7 @@ COURSE_TYPE_MAP = {
     'public': 'XGXK',       # 通识教育选修课程
     'recommend': 'TJKC',    # 推荐课程
     'major': 'FANKC',       # 主修课程（服务器代码保持 FANKC）
+    'cross_major': 'FAWKC', # 跨专业课程
     'sport': 'TYKC',        # 体育课程
 }
 
@@ -16,6 +17,7 @@ COURSE_TYPE_MAP = {
 API_ENDPOINT_MAP = {
     'TJKC': 'recommendedCourse.do',
     'FANKC': 'programCourse.do',
+    'FAWKC': 'programCourse.do',
     'XGXK': 'publicCourse.do',
     'TYKC': 'programCourse.do',
 }
@@ -24,6 +26,7 @@ API_ENDPOINT_MAP = {
 COURSE_TYPES = {
     '推荐课程': 'TJKC',
     '主修课程': 'FANKC',
+    '跨专业课程': 'FAWKC',
     '通识教育选修课程': 'XGXK',
     '体育课程': 'TYKC',
 }
@@ -32,6 +35,7 @@ COURSE_TYPES = {
 COURSE_NAME_TO_TYPE = {
     '推荐课程': 'recommend',
     '主修课程': 'major',
+    '跨专业课程': 'cross_major',
     '通识教育选修课程': 'public',
     '体育课程': 'sport',
 }

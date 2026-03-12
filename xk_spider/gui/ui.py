@@ -561,7 +561,7 @@ class MainWindow(QMainWindow):
     """主窗口 - Modern Dark Dashboard"""
     
     # 版本信息
-    VERSION = "v2.1.0"
+    VERSION = "v2.2.0"
     GITHUB_URL = "https://github.com/YHalo-wyh/YNU-xk_spider-Pro"
     
     def __init__(self):
