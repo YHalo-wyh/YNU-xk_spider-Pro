@@ -561,7 +561,7 @@ class MainWindow(QMainWindow):
     """主窗口 - Modern Dark Dashboard"""
     
     # 版本信息
-    VERSION = "v2.2.0"
+    VERSION = "v2.3.0"
     GITHUB_URL = "https://github.com/YHalo-wyh/YNU-xk_spider-Pro"
     
     def __init__(self):
@@ -1602,7 +1602,7 @@ class MainWindow(QMainWindow):
         
         self.log(f"[SUCCESS] ✓ 登录成功！")
         self.log(f"[INFO] 校区: {campus_name} ({campus})")
-        self.log(f"[INFO] Token: {token}")
+        self.log("[INFO] Token 已获取")
         if self.batch_name and self.batch_name != self.batch_code:
             self.batch_label.setText(f"📅 选课批次: {self.batch_name} ({self.batch_code})")
             self.log(f"[INFO] Batch: {self.batch_name} ({self.batch_code})")

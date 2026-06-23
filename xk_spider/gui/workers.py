@@ -160,7 +160,7 @@ class CourseFetchWorker(QThread):
             # 使用 Session 上下文管理器确保连接正确释放
             with requests.Session() as session:
                 resp = session.post(url, headers=headers, cookies=cookie_dict, 
-                                   data=data, timeout=(3, 10), verify=False)
+                                   data=data, timeout=(3, 10))
                 
                 if resp.status_code == 200:
                     result = resp.json()
@@ -264,7 +264,7 @@ class LoginWorker(QThread):
     def _sync_server_time(self):
         try:
             local_before = int(time.time() * 1000)
-            resp = requests.head(f"{BASE_URL}/*default/index.do", timeout=(2, 3), verify=False)
+            resp = requests.head(f"{BASE_URL}/*default/index.do", timeout=(2, 3))
             local_after = int(time.time() * 1000)
             server_date = resp.headers.get('Date')
             if server_date:
@@ -388,7 +388,6 @@ class LoginWorker(QThread):
                     "X-Requested-With": "XMLHttpRequest"
                 },
                 timeout=(3, 8),
-                verify=False
             )
             
             if resp.status_code == 200:
@@ -451,19 +450,20 @@ class LoginWorker(QThread):
                 session.cookies.set(key, value)
             
             timestamp = str(self._get_server_timestamp())
-            resp = session.post(
-                f"{BASE_URL}/elective/batch.do?timestamp={timestamp}",
-                headers={
-                    "Accept": "application/json, text/javascript, */*; q=0.01",
-                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                    "X-Requested-With": "XMLHttpRequest",
-                    "token": token,
-                    "Referer": f"{BASE_URL}/*default/index.do",
-                },
-                data={},
-                timeout=(3, 8),
-                verify=False
-            )
+            url = f"{BASE_URL}/elective/batch.do?timestamp={timestamp}"
+            headers = {
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "X-Requested-With": "XMLHttpRequest",
+                "token": token,
+                "Referer": f"{BASE_URL}/*default/index.do",
+            }
+            resp = session.get(url, headers=headers, timeout=(3, 8))
+
+            # Current web client uses GET; fall back to POST for older deployments.
+            if resp.status_code in (405, 501):
+                post_headers = dict(headers)
+                post_headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8"
+                resp = session.post(url, headers=post_headers, data={}, timeout=(3, 8))
             
             if resp.status_code != 200:
                 return '', ''
@@ -506,8 +506,7 @@ class LoginWorker(QThread):
                     "electiveBatchCode": batch_code,
                     "studentCode": student_code,
                 },
-                timeout=(3, 8),
-                verify=False
+                timeout=(3, 8)
             )
             
             if resp.status_code != 200:
@@ -538,7 +537,7 @@ class LoginWorker(QThread):
             })
             
             self.status.emit("访问首页获取Cookie...")
-            resp = session.get(f"{BASE_URL}/*default/index.do", timeout=(5, 10), verify=False)
+            resp = session.get(f"{BASE_URL}/*default/index.do", timeout=(5, 10))
             
             if resp.status_code != 200:
                 return None, f"访问首页失败:{resp.status_code}"
@@ -548,7 +547,7 @@ class LoginWorker(QThread):
             
             timestamp = str(self._get_server_timestamp())
             resp = session.get(f"{BASE_URL}/student/4/vcode.do?timestamp={timestamp}",
-                             headers={"Accept": "application/json"}, timeout=(3, 8), verify=False)
+                             headers={"Accept": "application/json"}, timeout=(3, 8))
             
             if resp.status_code != 200:
                 return None, f"获取vtoken失败:{resp.status_code}"
@@ -561,7 +560,7 @@ class LoginWorker(QThread):
                 return None, "解析vtoken失败"
             
             resp_img = session.get(f"{BASE_URL}/student/vcode/image.do?vtoken={vtoken}",
-                                  timeout=(3, 8), verify=False)
+                                  timeout=(3, 8))
             
             if resp_img.status_code != 200 or len(resp_img.content) < 100:
                 return None, "下载验证码失败"
@@ -588,7 +587,7 @@ class LoginWorker(QThread):
             }
             
             login_resp = session.get(f"{BASE_URL}/student/check/login.do",
-                                    params=login_params, timeout=(3, 8), verify=False)
+                                    params=login_params, timeout=(3, 8))
             
             if login_resp.status_code != 200:
                 return None, f"登录请求失败:{login_resp.status_code}"
@@ -865,7 +864,6 @@ class MultiGrabWorker(QThread):
                 cookies=self._parse_cookies(self.cookies),
                 params=params,
                 timeout=(3, 8),  # 增加超时时间，避免卡住
-                verify=False,
                 allow_redirects=False
             )
             
@@ -1054,7 +1052,6 @@ class MultiGrabWorker(QThread):
                 cookies=self._parse_cookies(self.cookies),
                 data=data,
                 timeout=(3, 5),
-                verify=False,
                 allow_redirects=False  # 禁止自动重定向，便于检测302
             )
             
@@ -1164,7 +1161,6 @@ class MultiGrabWorker(QThread):
                 cookies=self._parse_cookies(self.cookies),
                 data=payload,
                 timeout=(3, 5),
-                verify=False,
                 allow_redirects=False
             )
             
@@ -1246,7 +1242,6 @@ class MultiGrabWorker(QThread):
                 headers=self._get_headers(),
                 cookies=self._parse_cookies(self.cookies),
                 timeout=(3, 5),
-                verify=False,
                 allow_redirects=False
             )
             
@@ -1307,7 +1302,6 @@ class MultiGrabWorker(QThread):
                 headers=self._get_headers(),
                 cookies=self._parse_cookies(self.cookies),
                 timeout=(3, 5),
-                verify=False
             )
             
             if resp.status_code != 200:
@@ -1353,7 +1347,6 @@ class MultiGrabWorker(QThread):
                 headers=self._get_headers(),
                 cookies=self._parse_cookies(self.cookies),
                 timeout=(3, 5),
-                verify=False
             )
             
             if resp.status_code != 200:
@@ -1752,7 +1745,7 @@ class MultiGrabWorker(QThread):
             
             try:
                 # 获取首页
-                resp = session.get(f"{BASE_URL}/*default/index.do", timeout=(3, 8), verify=False)
+                resp = session.get(f"{BASE_URL}/*default/index.do", timeout=(3, 8))
                 if resp.status_code != 200:
                     continue
                 
@@ -1762,8 +1755,7 @@ class MultiGrabWorker(QThread):
                     f"{BASE_URL}/student/4/vcode.do?timestamp={timestamp}",
                     headers={"Accept": "application/json"},
                     timeout=(3, 5),
-                    verify=False
-                )
+                    )
                 
                 if resp.status_code != 200:
                     continue
@@ -1776,8 +1768,7 @@ class MultiGrabWorker(QThread):
                 resp_img = session.get(
                     f"{BASE_URL}/student/vcode/image.do?vtoken={vtoken}",
                     timeout=(3, 8),
-                    verify=False
-                )
+                    )
                 
                 if resp_img.status_code != 200 or len(resp_img.content) < 100:
                     continue
@@ -1804,8 +1795,7 @@ class MultiGrabWorker(QThread):
                     f"{BASE_URL}/student/check/login.do",
                     params=login_params,
                     timeout=(3, 5),
-                    verify=False
-                )
+                    )
                 
                 if login_resp.status_code != 200:
                     continue
@@ -2332,7 +2322,6 @@ class MultiGrabWorker(QThread):
                 cookies=self._parse_cookies(self.cookies),
                 params={"timestamp": timestamp, "studentCode": self.student_code, "electiveBatchCode": self.batch_code},
                 timeout=(3, 5),
-                verify=False
             )
             
             return resp.status_code == 200 and not self._is_session_expired(response=resp)

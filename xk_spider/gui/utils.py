@@ -16,11 +16,6 @@ def fix_ssl_cert():
         os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
     except ImportError:
         pass
-    try:
-        import urllib3
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    except:
-        pass
 
 
 # 初始化时执行 SSL 修复

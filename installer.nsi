@@ -2,7 +2,7 @@
 !include "MUI2.nsh"
 
 Name "YNU选课助手 Pro"
-OutFile "YNU选课助手Pro_Setup.exe"
+OutFile "YNU.Pro_v2.3.0_Setup.exe"
 InstallDir "$LOCALAPPDATA\YNU选课助手Pro"
 RequestExecutionLevel user
 
