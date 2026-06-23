@@ -194,6 +194,12 @@ RequestExecutionLevel user
 !insertmacro MUI_LANGUAGE "SimpChinese"
 
 Section "Install"
+    ; Clean old runtime files first to avoid mixed Python/dependency DLLs after upgrades.
+    ; Keep user data such as xk_spider/config.json and logs intact.
+    Delete "$INSTDIR\YNU选课助手Pro.exe"
+    Delete "$INSTDIR\Watchdog.exe"
+    RMDir /r "$INSTDIR\_internal"
+
     SetOutPath "$INSTDIR"
     File /r "dist\\YNU选课助手Pro\\*.*"
     
