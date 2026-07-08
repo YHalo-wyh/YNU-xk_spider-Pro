@@ -5,8 +5,8 @@
 import json
 import time
 import re
+import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -18,7 +18,11 @@ from .config import (
     get_api_endpoint, get_course_type_code,
     BASE_URL
 )
-from .utils import create_ocr_instance, OCR_AVAILABLE, send_notification
+from .utils import (
+    create_ocr_instance, OCR_AVAILABLE, send_custom_webhooks,
+    make_legacy_feedback_channel,
+    send_notification,
+)
 from .logger import get_logger
 
 
@@ -53,59 +57,184 @@ def parse_int_field(value, default=0):
 class UpdateCheckWorker(QThread):
     """后台检查更新的 Worker"""
     finished = pyqtSignal(bool, str, str, str)  # (has_update, latest_version, download_url, error)
-    
+
     GITHUB_API_URL = "https://api.github.com/repos/YHalo-wyh/YNU-xk_spider-Pro/releases/latest"
-    
+
     def __init__(self, current_version):
         super().__init__()
         self.current_version = current_version
-    
+
     def _normalize_version(self, version):
         """将版本号标准化为纯数字点号格式（例如 v2.1.0 -> 2.1.0）"""
         if version is None:
             return ''
         return str(version).strip().lstrip('vV')
-    
+
+    def _find_exe_asset(self, assets):
+        """从 release assets 中找到 .exe 安装包下载链接"""
+        if not assets:
+            return None
+
+        # 优先查找包含"YNU"、"选课"或"Pro"且以.exe结尾的文件
+        for asset in assets:
+            name = asset.get('name', '').lower()
+            if name.endswith('.exe') and not name.endswith('.blockmap'):
+                # 排除自动更新的差分文件
+                return asset.get('browser_download_url')
+
+        return None
+
     def run(self):
         try:
             with requests.Session() as session:
-                resp = session.get(self.GITHUB_API_URL, timeout=(5, 10))
-                
+                session.headers.update({
+                    "User-Agent": "YNU-xk_spider-Pro UpdateChecker",
+                    "Accept": "application/vnd.github+json",
+                })
+                last_error = None
+                resp = None
+                for attempt in range(2):
+                    try:
+                        resp = session.get(self.GITHUB_API_URL, timeout=(10, 20))
+                        break
+                    except requests.exceptions.Timeout as error:
+                        last_error = error
+                        if attempt == 0:
+                            time.sleep(0.8)
+                            continue
+                        raise
+                    except requests.exceptions.RequestException as error:
+                        last_error = error
+                        if attempt == 0:
+                            time.sleep(0.8)
+                            continue
+                        raise
+
+                if resp is None:
+                    self.finished.emit(False, '', '', f'网络错误: {str(last_error)[:50]}')
+                    return
+
                 if resp.status_code == 200:
                     data = resp.json()
                     latest_version = self._normalize_version(data.get('tag_name', ''))
-                    download_url = data.get('html_url', '')
-                    release_notes = data.get('body', '')[:500]
-                    
+                    assets = data.get('assets', [])
+
                     if not latest_version:
                         self.finished.emit(False, '', '', '无法获取版本号')
                         return
-                    
+
+                    # 获取实际的 .exe 下载链接
+                    download_url = self._find_exe_asset(assets)
+                    if not download_url:
+                        # 如果没找到 .exe，回退到 release 页面
+                        download_url = data.get('html_url', '')
+
                     # 版本比较
                     has_update = self._compare_versions(latest_version, self.current_version)
                     self.finished.emit(has_update, latest_version, download_url, '')
-                    
+
                 elif resp.status_code == 404:
                     self.finished.emit(False, '', '', '暂无发布版本')
                 else:
                     self.finished.emit(False, '', '', f'HTTP {resp.status_code}')
-                    
+
         except requests.exceptions.Timeout:
             self.finished.emit(False, '', '', '请求超时')
         except Exception as e:
             self.finished.emit(False, '', '', f'网络错误: {str(e)[:50]}')
-    
+
     def _compare_versions(self, latest, current):
         """比较版本号，返回 True 表示有更新"""
         try:
             latest = self._normalize_version(latest)
             current = self._normalize_version(current)
-            
+
             def version_tuple(v):
                 return tuple(map(int, v.split('.')))
             return version_tuple(latest) > version_tuple(current)
         except:
             return latest != current
+
+
+class DownloadUpdateWorker(QThread):
+    """后台下载更新文件的 Worker"""
+    progress = pyqtSignal(int, int, int)  # (downloaded_bytes, total_bytes, percentage)
+    finished = pyqtSignal(str, str)  # (file_path, error)
+
+    def __init__(self, download_url, save_path):
+        super().__init__()
+        self.download_url = download_url
+        self.save_path = save_path
+        self._cancelled = False
+
+    def cancel(self):
+        """取消下载"""
+        self._cancelled = True
+
+    def run(self):
+        try:
+            with requests.Session() as session:
+                session.headers.update({
+                    "User-Agent": "YNU-xk_spider-Pro Updater",
+                })
+                # 设置较长的超时时间，因为文件可能比较大
+                last_error = None
+                resp = None
+                for attempt in range(2):
+                    try:
+                        resp = session.get(self.download_url, stream=True, timeout=(10, 30))
+                        break
+                    except requests.exceptions.RequestException as error:
+                        last_error = error
+                        if attempt == 0:
+                            time.sleep(0.8)
+                            continue
+                        raise
+
+                if resp is None:
+                    self.finished.emit('', f'下载失败: {str(last_error)[:100]}')
+                    return
+
+                if resp.status_code != 200:
+                    self.finished.emit('', f'下载失败: HTTP {resp.status_code}')
+                    return
+
+                # 获取文件总大小
+                total_size = int(resp.headers.get('content-length', 0))
+                downloaded_size = 0
+
+                # 分块下载
+                chunk_size = 8192
+                with open(self.save_path, 'wb') as f:
+                    for chunk in resp.iter_content(chunk_size=chunk_size):
+                        if self._cancelled:
+                            f.close()
+                            try:
+                                os.remove(self.save_path)
+                            except:
+                                pass
+                            self.finished.emit('', '下载已取消')
+                            return
+
+                        if chunk:
+                            f.write(chunk)
+                            downloaded_size += len(chunk)
+
+                            # 计算进度百分比
+                            if total_size > 0:
+                                percentage = int((downloaded_size / total_size) * 100)
+                            else:
+                                percentage = 0
+
+                            self.progress.emit(downloaded_size, total_size, percentage)
+
+                # 下载完成
+                self.finished.emit(self.save_path, '')
+
+        except requests.exceptions.Timeout:
+            self.finished.emit('', '下载超时')
+        except Exception as e:
+            self.finished.emit('', f'下载失败: {str(e)[:100]}')
 
 
 class CourseFetchWorker(QThread):
@@ -254,9 +383,19 @@ class LoginWorker(QThread):
         self.password = password
         self.ocr = None
         self._server_time_offset = 0
+        self._logger = get_logger()
         
         if OCR_AVAILABLE:
             self.ocr = create_ocr_instance()
+
+    def _masked_username(self):
+        """日志只记录脱敏账号，绝不记录密码。"""
+        value = str(self.username or '').strip()
+        if len(value) <= 2:
+            return '*' * len(value)
+        if len(value) <= 4:
+            return f"{value[0]}***{value[-1]}"
+        return f"{value[:2]}***{value[-2:]}"
     
     def _get_server_timestamp(self):
         return int(time.time() * 1000) + self._server_time_offset
@@ -593,9 +732,10 @@ class LoginWorker(QThread):
                 return None, f"登录请求失败:{login_resp.status_code}"
             
             result = login_resp.json()
+            code = str(result.get('code', ''))
             msg = result.get('msg', '')
             
-            if result.get('code') == '1':
+            if code == '1':
                 data = result.get('data', {})
                 return {
                     'token': data.get('token', ''),
@@ -603,12 +743,26 @@ class LoginWorker(QThread):
                     'name': data.get('name', '') or data.get('studentName', ''),
                     'cookies': session.cookies.get_dict(),
                 }, "success"
-            else:
-                if '验证码' in msg:
-                    return None, "captcha_error"
-                elif '密码' in msg or '用户名' in msg or '账号' in msg:
-                    return None, f"login_error:{msg}"
-                return None, f"error:{msg}"
+            if code == '2':
+                self._logger.warning(
+                    f"登录失败：账号或密码错误（服务端 code=2，账号={self._masked_username()}）"
+                )
+                return None, "credentials_error"
+            if code == '3':
+                return None, "captcha_error"
+            if code == '4':
+                self._logger.warning("登录失败：在线人数超过上限（服务端 code=4）")
+                return None, "online_limit"
+
+            msg_text = str(msg or '')
+            if '验证码' in msg_text:
+                return None, "captcha_error"
+            if any(keyword in msg_text for keyword in ('密码', '用户名', '登录名', '账号')):
+                self._logger.warning(
+                    f"登录失败：服务端判定账号凭据无效（账号={self._masked_username()}）"
+                )
+                return None, "credentials_error"
+            return None, f"error:{msg_text or '系统异常'}"
             
         except requests.exceptions.Timeout:
             return None, "请求超时"
@@ -656,8 +810,11 @@ class LoginWorker(QThread):
                 self.status.emit("验证码错误，重试...")
                 time.sleep(0.2)
                 continue
-            elif result and result.startswith("login_error:"):
-                self.failed.emit(f"登录失败：{result[12:]}\n\n请检查学号和密码是否正确。")
+            elif result == "credentials_error":
+                self.failed.emit("登录名或密码不正确，请检查后重试。")
+                return
+            elif result == "online_limit":
+                self.failed.emit("当前在线人数超过上限，请稍后重试。")
                 return
             else:
                 self.status.emit(f"{result}，重试...")
@@ -680,9 +837,12 @@ class MultiGrabWorker(QThread):
     session_updated = pyqtSignal(str, str)  # (token, cookies)
     heartbeat = pyqtSignal(int)           # 心跳信号 (总请求次数)
     login_status = pyqtSignal(bool, str)  # 登录状态信号 (是否在线, 状态描述)
+    courses_retired = pyqtSignal(list, str)  # (自动停止的课程ID列表, 原因)
     
     def __init__(self, courses, student_code, batch_code, token, cookies,
-                 campus='02', username='', password='', max_workers=5, serverchan_key=''):
+                 campus='02', username='', password='', max_workers=5,
+                 serverchan_key='', feedback_url='', webhook_channels=None,
+                 conflict_policy=None):
         super().__init__()
         self.student_code = student_code
         self.batch_code = batch_code
@@ -691,8 +851,24 @@ class MultiGrabWorker(QThread):
         self.campus = campus  # 校区代码
         self.username = username
         self.password = password
-        self.max_workers = max_workers
+        try:
+            self.max_workers = max(1, int(max_workers))
+        except (TypeError, ValueError):
+            self.max_workers = 1
         self.serverchan_key = serverchan_key  # Server酱 SendKey
+        self.feedback_url = str(feedback_url or '').strip()
+        self.webhook_channels = list(webhook_channels or [])
+        if self.feedback_url and not self.webhook_channels:
+            legacy_channel = make_legacy_feedback_channel(self.feedback_url)
+            if legacy_channel:
+                self.webhook_channels = [legacy_channel]
+        self.conflict_policy = conflict_policy if isinstance(conflict_policy, dict) else {}
+        self._conflict_groups = self.conflict_policy.get('groups', []) if self.conflict_policy else []
+        self._course_conflict_group = {}
+        for group in self._conflict_groups:
+            group_id = str(group.get('id') or '')
+            for course_id in group.get('course_ids', []) or []:
+                self._course_conflict_group[str(course_id)] = group_id
         
         # 线程安全：课程列表保护
         self._courses_mutex = QMutex()
@@ -718,35 +894,228 @@ class MultiGrabWorker(QThread):
         self._last_activity_time = time.time()
         self._health_check_interval = 120  # 2分钟检查一次健康状态
         
-        # 初始化 HTTP Session（大连接池）
-        self.http_session = requests.Session()
-        adapter = HTTPAdapter(
-            pool_connections=20,
-            pool_maxsize=20,
-            max_retries=Retry(
-                total=2,
-                backoff_factor=0.1,
-                status_forcelist=[500, 502, 503, 504]
-            )
+        # 真并发请求层：并发数限制“同时在途的 HTTP 请求”，每个线程使用
+        # 独立 Session，避免 requests.Session 被多线程共享导致状态竞争。
+        self._request_slots = threading.BoundedSemaphore(self.max_workers)
+        self._session_local = threading.local()
+        self._sessions = set()
+        self._sessions_lock = threading.Lock()
+        self._active_requests = 0
+        self._peak_active_requests = 0
+        self._active_requests_lock = threading.Lock()
+
+        # HTTP 重试配置由每个线程自己的 Session 复用。
+        self._retry_config = Retry(
+            total=2,
+            backoff_factor=0.1,
+            status_forcelist=[500, 502, 503, 504]
         )
-        self.http_session.mount('https://', adapter)
-        self.http_session.mount('http://', adapter)
-        self.http_session.headers.update({
+
+        # 日志
+        self._logger = get_logger()
+
+        # OCR 实例（用于自动重登）
+        self.ocr = None
+        if OCR_AVAILABLE:
+            self.ocr = create_ocr_instance()
+
+    def _create_http_session(self):
+        """创建当前线程专用的 HTTP Session。"""
+        session = requests.Session()
+        adapter = HTTPAdapter(
+            pool_connections=2,
+            pool_maxsize=2,
+            max_retries=self._retry_config,
+            pool_block=True,
+        )
+        session.mount('https://', adapter)
+        session.mount('http://', adapter)
+        session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Accept": "application/json, text/javascript, */*; q=0.01",
             "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
             "X-Requested-With": "XMLHttpRequest",
             "Origin": "https://xk.ynu.edu.cn",
         })
-        
-        # OCR 实例（用于自动重登）
-        self.ocr = None
-        if OCR_AVAILABLE:
-            self.ocr = create_ocr_instance()
-        
-        # 日志
-        self._logger = get_logger()
-    
+        with self._sessions_lock:
+            self._sessions.add(session)
+        return session
+
+    def _get_http_session(self):
+        session = getattr(self._session_local, 'session', None)
+        if session is None:
+            session = self._create_http_session()
+            self._session_local.session = session
+        return session
+
+    def _request_with_session(self, session, method, url, **kwargs):
+        """通过有界并发槽发送请求，并记录实际并发峰值。"""
+        acquired = False
+        while self._running:
+            acquired = self._request_slots.acquire(timeout=0.2)
+            if acquired:
+                break
+        if not acquired:
+            raise requests.exceptions.RequestException("监控已停止")
+
+        with self._active_requests_lock:
+            self._active_requests += 1
+            self._peak_active_requests = max(
+                self._peak_active_requests, self._active_requests
+            )
+        try:
+            return session.request(method, url, **kwargs)
+        finally:
+            with self._active_requests_lock:
+                self._active_requests -= 1
+            self._request_slots.release()
+
+    def _request(self, method, url, **kwargs):
+        return self._request_with_session(
+            self._get_http_session(), method, url, **kwargs
+        )
+
+    def _close_http_sessions(self):
+        with self._sessions_lock:
+            sessions = list(self._sessions)
+            self._sessions.clear()
+        for session in sessions:
+            try:
+                session.close()
+            except Exception:
+                pass
+
+    def _mask_username(self):
+        username = str(self.username or '')
+        if len(username) <= 4:
+            return '*' * len(username)
+        return username[:2] + '*' * max(2, len(username) - 4) + username[-2:]
+
+    def _course_context(self, course=None, **extra):
+        course = course or {}
+        context = {
+            'course_id': course.get('JXBID', ''),
+            'course_name': course.get('KCM', ''),
+            'teacher': course.get('SKJS', ''),
+            'course_type': course.get('type', ''),
+            'class_time': course.get('SKSJ', '') or course.get('classTime', ''),
+            'batch_code': self.batch_code,
+            'campus': self.campus,
+            'username_masked': self._mask_username(),
+            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+        }
+        context.update(extra)
+        return context
+
+    def _send_notifications(self, title, content='', event='notification', context=None):
+        """同时分发到已启用的 Server酱和开发者 Webhook。"""
+        if self.serverchan_key:
+            send_notification(self.serverchan_key, title, content)
+        if self.webhook_channels:
+            send_custom_webhooks(self.webhook_channels, event, title, content, context or {})
+
+    def _get_conflict_group(self, tc_id):
+        group_id = self._course_conflict_group.get(str(tc_id))
+        if not group_id:
+            return None
+        for group in self._conflict_groups:
+            if str(group.get('id') or '') == group_id:
+                return group
+        return None
+
+    def _remove_courses_safe(self, tc_ids):
+        """从内部列表安全批量移除课程，返回实际移除的课程信息。"""
+        remove_ids = {str(tc_id) for tc_id in tc_ids if tc_id}
+        if not remove_ids:
+            return []
+        removed = []
+        self._courses_mutex.lock()
+        try:
+            remaining = []
+            for course in self._courses:
+                if str(course.get('JXBID', '')) in remove_ids:
+                    removed.append(course)
+                else:
+                    remaining.append(course)
+            self._courses = remaining
+        finally:
+            self._courses_mutex.unlock()
+        return removed
+
+    def _retire_conflicting_pending_courses(self, winner_course):
+        """
+        按启动前的待抢冲突策略，成功抢到一门后自动停止同组待抢课程。
+        默认：本组任意一门成功后停止其它课程。
+        首选：非首选先成功时保留首选继续监控；首选成功时停止其它课程。
+        """
+        winner_id = str(winner_course.get('JXBID', '') if winner_course else '')
+        if not winner_id:
+            return
+
+        group = self._get_conflict_group(winner_id)
+        if not group:
+            return
+
+        group_ids = {str(course_id) for course_id in group.get('course_ids', []) or []}
+        group_ids.discard(winner_id)
+        if not group_ids:
+            return
+
+        preferred_id = str(group.get('preferred_id') or '')
+        preferred_name = str(group.get('preferred_name') or '首选课程')
+        winner_name = winner_course.get('KCM', '') or '未知课程'
+
+        if preferred_id and winner_id != preferred_id:
+            stop_ids = group_ids - {preferred_id}
+            self.status.emit(
+                f"[优先级] 已抢到非首选 {winner_name}，首选 {preferred_name} 继续监控；"
+                "若后续首选有余量，可能触发换课。"
+            )
+        else:
+            stop_ids = group_ids
+
+        removed = self._remove_courses_safe(stop_ids)
+        if not removed:
+            return
+
+        removed_ids = [str(course.get('JXBID', '')) for course in removed if course.get('JXBID')]
+        removed_names = [str(course.get('KCM', '') or '未知课程') for course in removed]
+        if preferred_id and winner_id == preferred_id:
+            reason = (
+                f"首选课程 {winner_name} 已抢到，已停止本冲突组其它待抢课程："
+                f"{'、'.join(removed_names)}"
+            )
+        elif preferred_id and winner_id != preferred_id:
+            reason = (
+                f"已抢到非首选 {winner_name}，首选 {preferred_name} 继续监控，"
+                f"已停止其它非首选冲突课程：{'、'.join(removed_names)}"
+            )
+        else:
+            reason = (
+                f"已抢到 {winner_name}，按默认安全策略停止本冲突组其它待抢课程："
+                f"{'、'.join(removed_names)}"
+            )
+
+        self.status.emit(f"[冲突组] {reason}")
+        self._logger.info(f"待抢冲突组自动停止: {reason}")
+        self.courses_retired.emit(removed_ids, reason)
+        self._send_notifications(
+            f"🛑 已停止冲突待抢课程: {winner_name}",
+            reason,
+            event='conflict_target_retired',
+            context=self._course_context(
+                winner_course,
+                retired_course_names='、'.join(removed_names),
+                retired_course_ids=','.join(removed_ids),
+                message=reason,
+            )
+        )
+
+    def _handle_success_cleanup(self, course):
+        tc_id = course.get('JXBID', '') if course else ''
+        self._remove_course_safe(tc_id)
+        self._retire_conflicting_pending_courses(course)
+
     def _increment_request_count(self):
         """线程安全地增加请求计数并发送心跳"""
         with self._request_count_lock:
@@ -858,7 +1227,7 @@ class MultiGrabWorker(QThread):
                 "electiveBatchCode": self.batch_code,
             }
             
-            resp = self.http_session.get(
+            resp = self._request('GET',
                 url,
                 headers=self._get_headers(),
                 cookies=self._parse_cookies(self.cookies),
@@ -1046,7 +1415,7 @@ class MultiGrabWorker(QThread):
             url = f"{BASE_URL}/elective/{api_endpoint}"
             data = {"querySetting": json.dumps(query_param, ensure_ascii=False)}
             
-            resp = self.http_session.post(
+            resp = self._request('POST',
                 url,
                 headers=self._get_headers(),
                 cookies=self._parse_cookies(self.cookies),
@@ -1155,7 +1524,7 @@ class MultiGrabWorker(QThread):
             
             self._logger.info(f"选课请求: tc_id={tc_id}, type={course_type_code}")
             
-            resp = self.http_session.post(
+            resp = self._request('POST',
                 url,
                 headers=self._get_headers(),
                 cookies=self._parse_cookies(self.cookies),
@@ -1236,7 +1605,7 @@ class MultiGrabWorker(QThread):
             
             self._logger.info(f"退课请求: tc_id={tc_id}, params={params}")
             
-            resp = self.http_session.get(
+            resp = self._request('GET',
                 url,
                 params=params,
                 headers=self._get_headers(),
@@ -1296,7 +1665,7 @@ class MultiGrabWorker(QThread):
                 "electiveBatchCode": self.batch_code,
             }
             
-            resp = self.http_session.get(
+            resp = self._request('GET',
                 url,
                 params=params,
                 headers=self._get_headers(),
@@ -1341,7 +1710,7 @@ class MultiGrabWorker(QThread):
                 "electiveBatchCode": self.batch_code,
             }
             
-            resp = self.http_session.get(
+            resp = self._request('GET',
                 url,
                 params=params,
                 headers=self._get_headers(),
@@ -1514,9 +1883,9 @@ class MultiGrabWorker(QThread):
         """
         在已选课程中查找与目标课程时间冲突的课程
         策略：
-        1. 优先通过 conflictDesc 严格全名匹配
-        2. 其次通过时间比对
-        3. 最后兜底：仅剩一门已选课程时返回该课程
+        1. 优先使用学校接口返回的 conflictDesc 严格全名匹配
+        2. 其次通过时间交集进行唯一匹配
+        3. 结果为 0 门或多门时拒绝自动退课
         返回: {'id': tc_id, 'name': name, ...} 或 None
         """
         target_name = target_course.get('KCM', '')
@@ -1535,11 +1904,11 @@ class MultiGrabWorker(QThread):
         for sc in selected_courses:
             self._logger.debug(f"  - {sc['name']}: {sc['time']}")
         
-        # 策略1: 通过 conflictDesc 严格全名匹配
+        # 策略1: 学校前端直接使用 conflictDesc 展示冲突原因，优先以它为准。
         if conflict_desc:
             self._logger.info("尝试通过 conflictDesc 严格全名匹配...")
             normalized_desc = re.sub(r'\s+', '', str(conflict_desc))
-
+            name_matches = []
             for selected in selected_courses:
                 selected_name = str(selected.get('name', '') or '')
                 normalized_name = re.sub(r'\s+', '', selected_name)
@@ -1549,24 +1918,42 @@ class MultiGrabWorker(QThread):
                 # 严格全名匹配：避免“计算机网络”误命中“计算机网络实践”
                 pattern = rf'(?<![\u4e00-\u9fffA-Za-z0-9]){re.escape(normalized_name)}(?![\u4e00-\u9fffA-Za-z0-9])'
                 if re.search(pattern, normalized_desc):
-                    self._logger.info(f"通过 conflictDesc 严格全名匹配: {selected_name}")
-                    return selected
+                    name_matches.append(selected)
+
+            if len(name_matches) == 1:
+                self._logger.info(
+                    f"通过 conflictDesc 唯一匹配: {name_matches[0]['name']}"
+                )
+                return name_matches[0]
+            if len(name_matches) > 1:
+                names = ', '.join(item.get('name', '') for item in name_matches)
+                self._logger.warning(
+                    f"conflictDesc 同时匹配多门已选课程，拒绝自动退课: {names}"
+                )
+                return None
         
-        # 策略2: 通过时间比对
+        # 策略2: conflictDesc 未给出可识别课程名时，用时间交集唯一匹配。
         if target_time:
             self._logger.info("尝试通过时间比对匹配...")
+            time_matches = []
             for selected in selected_courses:
                 selected_time = selected.get('time', '')
                 if selected_time and self._check_time_conflict(target_time, selected_time):
-                    self._logger.info(f"通过时间比对发现冲突: {selected['name']}")
-                    return selected
+                    time_matches.append(selected)
+
+            if len(time_matches) == 1:
+                self._logger.info(
+                    f"通过时间交集唯一匹配: {time_matches[0]['name']}"
+                )
+                return time_matches[0]
+            if len(time_matches) > 1:
+                names = ', '.join(item.get('name', '') for item in time_matches)
+                self._logger.warning(
+                    f"目标课程同时冲突多门已选课程，拒绝自动退课: {names}"
+                )
+                return None
         
-        # 策略3: 如果只有一门已选课程，直接返回（大概率就是它）
-        if len(selected_courses) == 1:
-            self._logger.info(f"只有一门已选课程，假定为冲突课程: {selected_courses[0]['name']}")
-            return selected_courses[0]
-        
-        self._logger.warning(f"无法定位冲突课程")
+        self._logger.warning("无法唯一定位冲突课程，已阻止自动退课")
         return None
     
     def _check_course_selected(self, tc_id):
@@ -1647,6 +2034,7 @@ class MultiGrabWorker(QThread):
         # Step 3: 抢入目标课程
         self.status.emit(f"[换课] Step 3: 选课 {course_name}...")
         success, msg, _ = self._api_select_course_fast(course)
+        target_uncertain = False
         
         if success:
             # Step 4: 核实
@@ -1657,10 +2045,13 @@ class MultiGrabWorker(QThread):
                 self._logger.info(f"换课成功: {conflict_name} → {course_name}")
                 return True, conflict_course
             elif is_selected is None:
-                # 必须核实成功才视为成功，查询失败时不发成功通知，也不触发回滚
-                self.status.emit(f"[换课] Step 4: 核实查询失败，暂不判定成功，继续监控")
-                self._logger.warning(f"换课核实失败，暂不判定成功: {course_name}")
-                return False, conflict_course
+                # 必须核实成功才视为成功；查询失败时进入安全救援，不直接继续监控。
+                target_uncertain = True
+                msg = "目标课核实查询失败"
+                self.status.emit(f"[换课] Step 4: 核实查询失败，进入安全救援")
+                self._logger.warning(f"换课核实失败，进入安全救援: {course_name}")
+            else:
+                msg = "目标课核实未选中"
         
         # Step 5: 选课失败，进入紧急救援模式 - 亡命回滚（直到成功）
         self.status.emit(f"[换课] Step 5: 选课失败({msg})，进入紧急救援模式...")
@@ -1682,6 +2073,19 @@ class MultiGrabWorker(QThread):
                 self.status.emit(
                     f"[紧急救援] 🔄 第{attempt_count}次尝试抢回 {conflict_name}"
                 )
+
+            # 如果目标课选课接口曾返回成功但核实接口异常，先确认目标课是否已经在课表中。
+            # 一旦确认目标课已选，就视为换课成功，避免误把刚抢到的新课又换回去。
+            if target_uncertain or attempt_count % 5 == 0:
+                target_selected = self._verify_course_selected(
+                    tc_id,
+                    max_attempts=1,
+                    retry_interval=0
+                )
+                if target_selected is True:
+                    self.status.emit(f"[紧急救援] ✓ 已确认目标课程 {course_name} 在课表中，停止回滚")
+                    self._logger.info(f"安全救援确认目标课已选: {course_name}")
+                    return True, conflict_course
             
             # 尝试选回旧课
             rollback_success, rollback_msg, _ = self._api_select_course_fast({
@@ -1699,12 +2103,36 @@ class MultiGrabWorker(QThread):
                 if is_selected is True:
                     self.status.emit(f"[紧急救援] ✓ 成功抢回 {conflict_name}！(尝试{attempt_count}次)")
                     self._logger.info(f"紧急救援成功: {conflict_name}, 尝试次数: {attempt_count}")
+                    self._send_notifications(
+                        f"✅ 回滚成功: {conflict_name}",
+                        f"目标课程 {course_name} 未确认成功，已抢回原课程 {conflict_name}。尝试次数: {attempt_count}",
+                        event='rollback_success',
+                        context=self._course_context(
+                            course,
+                            old_course_name=conflict_name,
+                            new_course_name=course_name,
+                            attempt_count=attempt_count,
+                            message=f"回滚成功: {conflict_name}"
+                        )
+                    )
                     return False, conflict_course
             
             # 检查是否因为"已选"而失败（说明已经抢回了）
             if rollback_msg and ('已选' in rollback_msg or '重复' in rollback_msg):
                 self.status.emit(f"[紧急救援] ✓ {conflict_name} 已在课表中！")
                 self._logger.info(f"紧急救援成功(已选): {conflict_name}")
+                self._send_notifications(
+                    f"✅ 回滚确认: {conflict_name}",
+                    f"系统返回 {conflict_name} 已在课表中，回滚视为成功。",
+                    event='rollback_success',
+                    context=self._course_context(
+                        course,
+                        old_course_name=conflict_name,
+                        new_course_name=course_name,
+                        attempt_count=attempt_count,
+                        message=f"回滚确认成功: {conflict_name}"
+                    )
+                )
                 return False, conflict_course
             
             # 短暂休眠后继续
@@ -1713,6 +2141,18 @@ class MultiGrabWorker(QThread):
         # 被外部停止
         self.status.emit(f"[紧急救援] 监控已停止，请手动检查 {conflict_name}")
         self._logger.warning(f"紧急救援被中断: {conflict_name}")
+        self._send_notifications(
+            f"🆘 回滚未确认: {conflict_name}",
+            f"监控已停止，未能确认原课程 {conflict_name} 是否已抢回，请立即手动检查。",
+            event='rollback_failed',
+            context=self._course_context(
+                course,
+                old_course_name=conflict_name,
+                new_course_name=course_name,
+                attempt_count=attempt_count,
+                message=f"回滚未确认: {conflict_name}"
+            )
+        )
         return False, conflict_course
 
     def _do_relogin(self):
@@ -1731,6 +2171,8 @@ class MultiGrabWorker(QThread):
             return False, '', ''
         
         session = requests.Session()
+        with self._sessions_lock:
+            self._sessions.add(session)
         session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Referer": f"{BASE_URL}/*default/index.do",
@@ -1745,13 +2187,16 @@ class MultiGrabWorker(QThread):
             
             try:
                 # 获取首页
-                resp = session.get(f"{BASE_URL}/*default/index.do", timeout=(3, 8))
+                resp = self._request_with_session(
+                    session, 'GET', f"{BASE_URL}/*default/index.do", timeout=(3, 8)
+                )
                 if resp.status_code != 200:
                     continue
                 
                 # 获取 vtoken
                 timestamp = str(int(time.time() * 1000))
-                resp = session.get(
+                resp = self._request_with_session(
+                    session, 'GET',
                     f"{BASE_URL}/student/4/vcode.do?timestamp={timestamp}",
                     headers={"Accept": "application/json"},
                     timeout=(3, 5),
@@ -1765,7 +2210,8 @@ class MultiGrabWorker(QThread):
                     continue
                 
                 # 获取验证码图片
-                resp_img = session.get(
+                resp_img = self._request_with_session(
+                    session, 'GET',
                     f"{BASE_URL}/student/vcode/image.do?vtoken={vtoken}",
                     timeout=(3, 8),
                     )
@@ -1791,7 +2237,8 @@ class MultiGrabWorker(QThread):
                     "vtoken": vtoken
                 }
                 
-                login_resp = session.get(
+                login_resp = self._request_with_session(
+                    session, 'GET',
                     f"{BASE_URL}/student/check/login.do",
                     params=login_params,
                     timeout=(3, 5),
@@ -1802,7 +2249,8 @@ class MultiGrabWorker(QThread):
                 
                 result = login_resp.json()
                 
-                if result.get('code') == '1':
+                result_code = str(result.get('code', ''))
+                if result_code == '1':
                     data = result.get('data', {})
                     new_token = data.get('token', '')
                     new_cookies = '; '.join([f"{k}={v}" for k, v in session.cookies.get_dict().items()])
@@ -1819,8 +2267,8 @@ class MultiGrabWorker(QThread):
                     time.sleep(0.2)
                     continue
                 
-                # 密码错误等致命错误
-                if '密码' in msg or '用户名' in msg or '账号' in msg:
+                # 云南大学前端约定 code=2 表示登录名或密码不正确。
+                if result_code == '2' or any(k in msg for k in ('密码', '用户名', '登录名', '账号')):
                     self.status.emit(f"[自动重登] 账号密码错误: {msg}")
                     self._relogin_failed_permanently = True
                     return False, '', ''
@@ -1909,7 +2357,7 @@ class MultiGrabWorker(QThread):
                 if state.get('last_status') != 'chosen':
                     self.status.emit(f"[INFO] {course_name} 已选中")
                     state['last_status'] = 'chosen'
-                self._remove_course_safe(tc_id)
+                self._handle_success_cleanup(course)
                 break
             
             # ========== 安全策略 2: 最高优先级检查 isFull ==========
@@ -1949,13 +2397,17 @@ class MultiGrabWorker(QThread):
                     self.course_available.emit(course_name, teacher, remain, capacity)
                     state['last_status'] = 'available'
                     
-                    # Server酱通知：发现余量
-                    if self.serverchan_key:
-                        send_notification(
-                            self.serverchan_key,
-                            f"🎯 发现余量: {course_name}",
-                            f"**课程**: {course_name}\n\n**教师**: {teacher}\n\n**余量**: {remain}/{capacity}\n\n正在尝试抢课..."
+                    self._send_notifications(
+                        f"🎯 发现余量: {course_name}",
+                        f"**课程**: {course_name}\n\n**教师**: {teacher}\n\n**余量**: {remain}/{capacity}\n\n正在尝试抢课...",
+                        event='course_available',
+                        context=self._course_context(
+                            course,
+                            remain=remain,
+                            capacity=capacity,
+                            message=f"{course_name} 发现余量 {remain}/{capacity}"
                         )
+                    )
                 
                 state['last_remain'] = remain
                 
@@ -1980,14 +2432,18 @@ class MultiGrabWorker(QThread):
                             f"🔄 换课成功: {conflict_name} → {course_name} - {teacher}", 
                             course
                         )
-                        # Server酱通知：换课成功
-                        if self.serverchan_key:
-                            send_notification(
-                                self.serverchan_key,
-                                f"🎉 换课成功: {course_name}",
-                                f"**新课程**: {course_name}\n\n**教师**: {teacher}\n\n**方式**: 换课成功\n\n**原课程**: {conflict_name}"
+                        self._send_notifications(
+                            f"🎉 换课成功: {course_name}",
+                            f"**新课程**: {course_name}\n\n**教师**: {teacher}\n\n**方式**: 换课成功\n\n**原课程**: {conflict_name}",
+                            event='swap_success',
+                            context=self._course_context(
+                                course,
+                                old_course_name=conflict_name,
+                                new_course_name=course_name,
+                                message=f"换课成功: {conflict_name} → {course_name}"
                             )
-                        self._remove_course_safe(tc_id)
+                        )
+                        self._handle_success_cleanup(course)
                         break
                     else:
                         self.status.emit(f"[CONFLICT] 换课失败，等待下次余量...")
@@ -2005,14 +2461,16 @@ class MultiGrabWorker(QThread):
                     is_selected = self._verify_course_selected(tc_id)
                     if is_selected is True:
                         self.success.emit(f"🎉 抢课成功: {course_name} - {teacher}", course)
-                        # Server酱通知：抢课成功
-                        if self.serverchan_key:
-                            send_notification(
-                                self.serverchan_key,
-                                f"🎉 抢课成功: {course_name}",
-                                f"**课程**: {course_name}\n\n**教师**: {teacher}\n\n**方式**: 正常抢课"
+                        self._send_notifications(
+                            f"🎉 抢课成功: {course_name}",
+                            f"**课程**: {course_name}\n\n**教师**: {teacher}\n\n**方式**: 正常抢课",
+                            event='select_success',
+                            context=self._course_context(
+                                course,
+                                message=f"抢课成功: {course_name}"
                             )
-                        self._remove_course_safe(tc_id)
+                        )
+                        self._handle_success_cleanup(course)
                         break
                     else:
                         if is_selected is None:
@@ -2037,14 +2495,18 @@ class MultiGrabWorker(QThread):
                             f"🔄 换课成功: {conflict_name} → {course_name} - {teacher}", 
                             course
                         )
-                        # Server酱通知：换课成功（服务器返回冲突路径）
-                        if self.serverchan_key:
-                            send_notification(
-                                self.serverchan_key,
-                                f"🎉 换课成功: {course_name}",
-                                f"**新课程**: {course_name}\n\n**教师**: {teacher}\n\n**方式**: 换课成功\n\n**原课程**: {conflict_name}"
+                        self._send_notifications(
+                            f"🎉 换课成功: {course_name}",
+                            f"**新课程**: {course_name}\n\n**教师**: {teacher}\n\n**方式**: 换课成功\n\n**原课程**: {conflict_name}",
+                            event='swap_success',
+                            context=self._course_context(
+                                course,
+                                old_course_name=conflict_name,
+                                new_course_name=course_name,
+                                message=f"换课成功: {conflict_name} → {course_name}"
                             )
-                        self._remove_course_safe(tc_id)
+                        )
+                        self._handle_success_cleanup(course)
                         break
                     else:
                         self.status.emit(f"[CONFLICT] 换课失败，等待下次余量...")
@@ -2085,7 +2547,9 @@ class MultiGrabWorker(QThread):
             self.status.emit("[INFO] 没有待抢课程")
             return
         
-        self.status.emit(f"[INFO] 启动监控: {len(courses)} 门课程")
+        self.status.emit(
+            f"[INFO] 启动监控: {len(courses)} 门课程，HTTP并发上限: {self.max_workers}"
+        )
         
         # 为每门课程创建独立监控线程
         threads = []
@@ -2134,6 +2598,11 @@ class MultiGrabWorker(QThread):
         self._running = False
         for t in threads:
             t.join(timeout=2)
+
+        self._close_http_sessions()
+        self._logger.info(
+            f"HTTP并发统计: 配置={self.max_workers}, 实际峰值={self._peak_active_requests}"
+        )
         
         # 停止日志由 UI 统一输出，避免重复“监控已停止”
     
@@ -2316,7 +2785,7 @@ class MultiGrabWorker(QThread):
             timestamp = str(int(time.time() * 1000))
             url = f"{BASE_URL}/elective/courseResult.do"
             
-            resp = self.http_session.get(
+            resp = self._request('GET',
                 url,
                 headers=self._get_headers(),
                 cookies=self._parse_cookies(self.cookies),

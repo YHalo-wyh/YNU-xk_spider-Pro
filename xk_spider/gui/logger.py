@@ -8,6 +8,7 @@ import glob
 import logging
 from logging.handlers import TimedRotatingFileHandler
 from datetime import datetime, timedelta
+from xk_spider.storage import LOG_DIR as USER_LOG_DIR
 
 
 class AppLogger:
@@ -25,7 +26,7 @@ class AppLogger:
     _initialized = False
     
     # 配置
-    LOG_DIR = 'logs'
+    LOG_DIR = str(USER_LOG_DIR)
     LOG_FILE_PREFIX = 'run'
     RETENTION_DAYS = 7  # 保留最近7天的日志
     

@@ -6,10 +6,41 @@ import sys
 import shutil
 import subprocess
 
-APP_VERSION = "v2.3.0"
+APP_VERSION = "v2.4.0"
 ARTIFACT_PREFIX = f"YNU.Pro_{APP_VERSION}"
 SETUP_FILENAME = f"{ARTIFACT_PREFIX}_Setup.exe"
 PORTABLE_FILENAME = f"{ARTIFACT_PREFIX}_Portable.zip"
+
+RUNTIME_DATA_NAMES = {
+    "config.json",
+    "monitor_state.json",
+    "watchdog_signal.json",
+    "watchdog.lock",
+}
+
+
+def verify_runtime_data_isolation(dist_dir):
+    """确保账号配置、待选记录和日志没有进入发布产物。"""
+    leaked = []
+    for root, dirs, files in os.walk(dist_dir):
+        for filename in files:
+            relative = os.path.relpath(os.path.join(root, filename), dist_dir)
+            parts = relative.replace('\\', '/').split('/')
+            is_runtime_file = filename in RUNTIME_DATA_NAMES and (
+                len(parts) == 1 or 'xk_spider' in parts
+            )
+            is_runtime_log = filename.endswith('.log') and (
+                'logs' in parts or 'xk_spider' in parts
+            )
+            if is_runtime_file or is_runtime_log:
+                leaked.append(os.path.join(root, filename))
+    if not leaked:
+        return True
+
+    print("[ERROR] 构建产物包含用户运行数据，已终止打包：")
+    for path in leaked:
+        print(f"       {path}")
+    return False
 
 def check_and_install(package):
     """检查并安装包"""
@@ -84,8 +115,8 @@ def build_exe():
         "--windowed",          # 无控制台
         "--noconfirm",
         "--clean",
-        # 数据文件
-        "--add-data=xk_spider;xk_spider",
+        # Python 包由 PyInstaller 自动收集；禁止复制整个 xk_spider 目录，
+        # 避免把 config.json/monitor_state.json 带入安装包。
         "--add-data=assets;assets",  # 添加 assets 文件夹（包含图标）
         # 收集所有依赖
         "--collect-all=ddddocr",
@@ -160,6 +191,9 @@ def build_exe():
         print("[ERROR] Watchdog.exe 复制失败")
         return False
 
+    if not verify_runtime_data_isolation(main_dist_dir):
+        return False
+
     print("[OK] EXE 打包成功（已包含 Watchdog.exe）！")
     return True
 
@@ -181,6 +215,7 @@ def create_installer():
 Name "YNU选课助手 Pro"
 OutFile "{SETUP_FILENAME}"
 InstallDir "$LOCALAPPDATA\\YNU选课助手Pro"
+InstallDirRegKey HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\YNU选课助手Pro" "UninstallString"
 RequestExecutionLevel user
 
 !insertmacro MUI_PAGE_WELCOME
@@ -212,6 +247,7 @@ Section "Install"
     WriteUninstaller "$INSTDIR\\Uninstall.exe"
     WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\YNU选课助手Pro" "DisplayName" "YNU选课助手 Pro"
     WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\YNU选课助手Pro" "UninstallString" "$INSTDIR\\Uninstall.exe"
+    WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\YNU选课助手Pro" "InstallLocation" "$INSTDIR"
 SectionEnd
 
 Section "Uninstall"

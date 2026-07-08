@@ -3,10 +3,11 @@
 Modern Dark Dashboard 风格 (Catppuccin Mocha 配色)
 """
 import os
-import json
 import time
 import sys
 import subprocess
+import json
+import re
 
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -20,8 +21,16 @@ from PyQt5.QtCore import Qt, QTimer, pyqtSignal, pyqtProperty, QUrl
 from PyQt5.QtGui import QFont, QPainter, QColor, QTextCursor, QDesktopServices, QIcon
 
 from .config import COURSE_TYPES, COURSE_NAME_TO_TYPE, parse_int, MONITOR_STATE_FILE, WATCHDOG_SIGNAL_FILE
-from .workers import LoginWorker, MultiGrabWorker, CourseFetchWorker, UpdateCheckWorker
+from .workers import LoginWorker, MultiGrabWorker, CourseFetchWorker, UpdateCheckWorker, DownloadUpdateWorker
 from .logger import get_logger
+from .utils import (
+    default_webhook_config, make_legacy_feedback_channel,
+    normalize_webhook_channels, send_custom_webhooks,
+    validate_webhook_channels,
+)
+from xk_spider.storage import (
+    CONFIG_FILE, migrate_legacy_data, read_json, write_json_atomic,
+)
 
 
 # ========== Catppuccin Mocha 配色方案 ==========
@@ -561,7 +570,7 @@ class MainWindow(QMainWindow):
     """主窗口 - Modern Dark Dashboard"""
     
     # 版本信息
-    VERSION = "v2.3.0"
+    VERSION = "v2.4.0"
     GITHUB_URL = "https://github.com/YHalo-wyh/YNU-xk_spider-Pro"
     
     def __init__(self):
@@ -582,14 +591,26 @@ class MainWindow(QMainWindow):
         self._is_manual_login_attempt = False
         self._manual_login_fail_count = 0
         self._auto_relogin_retry_count = 0
+        self._installing_update = False
+        self._update_resume_monitoring = False
+        self._active_conflict_policy = None
+        self._pending_resume_conflict_policy = None
         
         # Server酱配置
         self.serverchan_enabled = False
         self.serverchan_key = ''
+
+        # 开发者模式配置
+        self.developer_mode_enabled = False
+        self.feedback_url = ''
+        self.developer_webhooks = []
         
         # 日志系统
         self._logger = get_logger()
         self._heartbeat_count = 0
+        migrated = migrate_legacy_data()
+        if migrated:
+            self._logger.info(f"已迁移 {len(migrated)} 个旧版用户数据文件到独立数据目录")
         
         # 自动轮询 Timer
         self.poll_timer = QTimer(self)
@@ -608,11 +629,15 @@ class MainWindow(QMainWindow):
         # 检查是否需要恢复监控（闪退恢复）
         self._pending_restore_state = None
         state = self.load_monitor_state()
-        if state and state.get('is_monitoring') and state.get('courses'):
-            self._pending_restore_state = state
-            self._logger.info(f"检测到上次监控未正常结束，待恢复 {len(state['courses'])} 门课程")
-            # 延迟自动登录（等待窗口显示后）
-            QTimer.singleShot(500, self._auto_login_for_restore)
+        if state and state.get('courses'):
+            self._restore_saved_watchlist(state)
+            if state.get('is_monitoring'):
+                self._pending_restore_state = state
+                self._logger.info(f"检测到上次监控未正常结束，待恢复 {len(state['courses'])} 门课程")
+                # 延迟自动登录（等待窗口显示后）
+                QTimer.singleShot(500, self._auto_login_for_restore)
+            else:
+                self._logger.info(f"已恢复 {len(state['courses'])} 门待选课程")
     
     def adjust_for_screen(self):
         screen = QApplication.primaryScreen()
@@ -815,7 +840,7 @@ class MainWindow(QMainWindow):
         notify_layout.addWidget(self.serverchan_key_input)
         
         left_layout.addWidget(notify_frame)
-        
+
         # 课程类型选择
         type_label = QLabel("📂 课程类型")
         type_label.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {Colors.SUBTEXT1}; padding-top: 8px;")
@@ -933,7 +958,7 @@ class MainWindow(QMainWindow):
         concurrency_layout = QHBoxLayout(concurrency_frame)
         concurrency_layout.setContentsMargins(14, 10, 14, 10)
         
-        conc_label = QLabel("⚡ 并发数")
+        conc_label = QLabel("⚡ HTTP并发")
         conc_label.setStyleSheet(f"color: {Colors.SUBTEXT1}; font-size: 14px;")
         concurrency_layout.addWidget(conc_label)
         
@@ -941,7 +966,7 @@ class MainWindow(QMainWindow):
         self.concurrency_spin.setRange(1, 20)
         self.concurrency_spin.setValue(5)
         self.concurrency_spin.setFixedWidth(70)
-        self.concurrency_spin.setToolTip("同时监控的线程数量（建议 3-10）")
+        self.concurrency_spin.setToolTip("同时进行的网络请求数量（建议 3-10）")
         concurrency_layout.addWidget(self.concurrency_spin)
         concurrency_layout.addStretch()
         right_layout.addWidget(concurrency_frame)
@@ -968,7 +993,7 @@ class MainWindow(QMainWindow):
                 color: {Colors.OVERLAY0};
             }}
         """)
-        self.start_grab_btn.clicked.connect(self.start_monitoring)
+        self.start_grab_btn.clicked.connect(lambda _=False: self.start_monitoring())
         btn_layout.addWidget(self.start_grab_btn)
         
         self.stop_grab_btn = QPushButton("⏹ 停止")
@@ -1060,6 +1085,10 @@ class MainWindow(QMainWindow):
         update_action = QAction("🔄 检查更新", self)
         update_action.triggered.connect(self._check_update)
         help_menu.addAction(update_action)
+
+        developer_action = QAction("🛠 开发者模式", self)
+        developer_action.triggered.connect(self._show_developer_mode_dialog)
+        help_menu.addAction(developer_action)
         
         help_menu.addSeparator()
         
@@ -1071,6 +1100,161 @@ class MainWindow(QMainWindow):
     def _open_github(self):
         """打开 GitHub 仓库"""
         QDesktopServices.openUrl(QUrl(self.GITHUB_URL))
+
+    def _show_developer_mode_dialog(self):
+        """配置开发者模式下的自定义 Webhook 通道。"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("开发者模式")
+        dialog.setMinimumWidth(820)
+        dialog.setMinimumHeight(680)
+
+        layout = QVBoxLayout(dialog)
+        description = QLabel(
+            "开发者模式用于接入自定义通知接口。这里直接使用完整 Webhook 配置："
+            "支持多个端点、事件筛选、请求方法、Headers、URL 参数和 Body 模板。"
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        enable_frame = QFrame()
+        enable_frame.setStyleSheet(f"""
+            QFrame {{
+                background-color: {Colors.SURFACE0};
+                border: 2px solid {Colors.MAUVE};
+                border-radius: 12px;
+            }}
+        """)
+        enable_layout = QVBoxLayout(enable_frame)
+        enable_layout.setContentsMargins(14, 12, 14, 12)
+        enable_layout.setSpacing(6)
+
+        enabled_checkbox = QCheckBox("启用开发者模式 / 自定义 Webhook 通知")
+        enabled_checkbox.setChecked(self.developer_mode_enabled)
+        enabled_checkbox.setStyleSheet(f"""
+            QCheckBox {{
+                color: {Colors.TEXT};
+                font-size: 16px;
+                font-weight: bold;
+                spacing: 12px;
+            }}
+            QCheckBox::indicator {{
+                width: 26px;
+                height: 26px;
+                border-radius: 7px;
+                border: 3px solid {Colors.MAUVE};
+                background-color: {Colors.MANTLE};
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: {Colors.MAUVE};
+                border-color: {Colors.LAVENDER};
+            }}
+            QCheckBox::indicator:hover {{
+                border-color: {Colors.LAVENDER};
+            }}
+        """)
+        enable_layout.addWidget(enabled_checkbox)
+
+        enable_hint = QLabel("勾选后才会按下面 JSON 配置向自定义 Webhook 发送事件通知。")
+        enable_hint.setWordWrap(True)
+        enable_hint.setStyleSheet(f"color: {Colors.SUBTEXT0}; font-size: 12px;")
+        enable_layout.addWidget(enable_hint)
+        layout.addWidget(enable_frame)
+
+        current_config = {"webhooks": self.developer_webhooks}
+        if not self.developer_webhooks and self.feedback_url:
+            migrated = make_legacy_feedback_channel(self.feedback_url)
+            current_config = {"webhooks": [migrated] if migrated else []}
+        if not current_config.get("webhooks"):
+            current_config = default_webhook_config()
+
+        config_label = QLabel("Webhook 配置 JSON")
+        layout.addWidget(config_label)
+
+        config_editor = QTextEdit()
+        config_editor.setAcceptRichText(False)
+        config_editor.setPlainText(json.dumps(current_config, ensure_ascii=False, indent=2))
+        config_editor.setEnabled(enabled_checkbox.isChecked())
+        layout.addWidget(config_editor, 1)
+
+        hint = QLabel(
+            "可用事件：test、course_available、select_success、swap_success、"
+            "rollback_success、rollback_failed、conflict_target_retired，也可以用 * 表示所有事件。\n"
+            "常用占位符：{event}、{title}、{content}、{course_name}、{teacher}、{remain}、"
+            "{capacity}、{old_course_name}、{new_course_name}、{message}、{timestamp}、"
+            "{username_masked}。URL 内占位符会自动 URL 编码。\n"
+            "提示：配置里可能包含访问密钥，请勿截图或分享配置文件。"
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color: {Colors.SUBTEXT0}; font-size: 12px;")
+        layout.addWidget(hint)
+
+        enabled_checkbox.toggled.connect(config_editor.setEnabled)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        test_button = buttons.addButton("测试发送", QDialogButtonBox.ActionRole)
+        layout.addWidget(buttons)
+
+        def parse_config_from_editor():
+            text = config_editor.toPlainText().strip()
+            if not text:
+                return {"webhooks": []}
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError as error:
+                raise ValueError(f"JSON 格式错误：第 {error.lineno} 行第 {error.colno} 列，{error.msg}")
+            channels = normalize_webhook_channels(parsed)
+            valid, error = validate_webhook_channels(channels)
+            if not valid:
+                raise ValueError(error)
+            return {"webhooks": channels}
+
+        def save_developer_config():
+            enabled = enabled_checkbox.isChecked()
+            try:
+                parsed = parse_config_from_editor()
+            except ValueError as error:
+                QMessageBox.warning(dialog, "Webhook 配置无效", str(error))
+                return
+            self.developer_mode_enabled = enabled
+            self.developer_webhooks = parsed.get("webhooks", [])
+            self.feedback_url = ''
+            self.save_config()
+            state = "已启用" if enabled else "已关闭"
+            self.log(f"[INFO] 开发者模式自定义 Webhook {state}，通道数: {len(self.developer_webhooks)}")
+            dialog.accept()
+
+        def test_developer_config():
+            try:
+                parsed = parse_config_from_editor()
+            except ValueError as error:
+                QMessageBox.warning(dialog, "Webhook 配置无效", str(error))
+                return
+            send_custom_webhooks(
+                parsed,
+                'test',
+                '🧪 YNU选课助手 Webhook 测试',
+                '这是一条开发者模式测试通知。只有 events 包含 test 或 * 的通道会收到。',
+                {
+                    'course_name': '测试课程',
+                    'teacher': '测试教师',
+                    'remain': 1,
+                    'capacity': 30,
+                    'message': '开发者模式测试通知',
+                    'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+                    'username_masked': self.username_input.text()[:2] + '****'
+                    if self.username_input.text() else '',
+                }
+            )
+            QMessageBox.information(
+                dialog,
+                "测试已发送",
+                "已触发 test 事件。只有 events 包含 test 或 * 的启用通道会收到。"
+            )
+
+        buttons.accepted.connect(save_developer_config)
+        buttons.rejected.connect(dialog.reject)
+        test_button.clicked.connect(test_developer_config)
+        dialog.exec_()
     
     def _check_update(self):
         """检查更新 - 使用 UpdateCheckWorker"""
@@ -1132,29 +1316,170 @@ class MainWindow(QMainWindow):
         if hasattr(self, '_update_check_dialog') and self._update_check_dialog:
             self._update_check_dialog.close()
         self.statusBar().showMessage("", 0)
-        
+
         if error:
             QMessageBox.warning(self, "检查更新", f"检查更新失败\n\n{error}")
             return
-        
+
         if not latest_version:
             QMessageBox.information(self, "检查更新", "暂无发布版本信息")
             return
-        
+
         current_text = self._format_version(self.VERSION)
         latest_text = self._format_version(latest_version)
-        
+
         if has_update:
-            msg = f"发现新版本！\n\n当前版本: {current_text}\n最新版本: {latest_text}"
-            reply = QMessageBox.question(
-                self, "发现新版本", 
-                msg + "\n\n是否前往下载？",
-                QMessageBox.Yes | QMessageBox.No
-            )
-            if reply == QMessageBox.Yes:
-                QDesktopServices.openUrl(QUrl(download_url))
+            # 检查是否是直接下载链接（.exe）
+            is_direct_download = str(download_url or '').lower().split('?', 1)[0].endswith('.exe')
+
+            if is_direct_download:
+                msg = f"发现新版本！\n\n当前版本: {current_text}\n最新版本: {latest_text}"
+                reply = QMessageBox.question(
+                    self, "发现新版本",
+                    msg + "\n\n是否立即下载并安装？",
+                    QMessageBox.Yes | QMessageBox.No
+                )
+                if reply == QMessageBox.Yes:
+                    self._start_download_update(download_url, latest_version)
+            else:
+                # 没有找到 .exe，回退到打开浏览器
+                msg = f"发现新版本！\n\n当前版本: {current_text}\n最新版本: {latest_text}"
+                reply = QMessageBox.question(
+                    self, "发现新版本",
+                    msg + "\n\n是否前往下载页面？",
+                    QMessageBox.Yes | QMessageBox.No
+                )
+                if reply == QMessageBox.Yes:
+                    QDesktopServices.openUrl(QUrl(download_url))
         else:
             QMessageBox.information(self, "检查更新", f"当前已是最新版本 {current_text}")
+
+    def _start_download_update(self, download_url, version):
+        """开始下载更新"""
+        # 确定保存路径
+        normalized_version = str(version or '').strip().lstrip('vV') or 'latest'
+        filename = f"YNU.Pro_v{normalized_version}_Setup.exe"
+        save_path = os.path.join(os.path.expanduser("~"), "Downloads", filename)
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
+        # 创建进度对话框
+        self._download_dialog = QProgressDialog(self)
+        self._download_dialog.setWindowTitle("下载更新")
+        self._download_dialog.setLabelText(f"正在下载 {filename}...\n0 MB / 0 MB (0%)")
+        self._download_dialog.setMinimum(0)
+        self._download_dialog.setMaximum(100)
+        self._download_dialog.setValue(0)
+        self._download_dialog.setWindowModality(Qt.WindowModal)
+        self._download_dialog.setAutoClose(False)
+        self._download_dialog.setAutoReset(False)
+        self._download_dialog.setStyleSheet(f"""
+            QProgressDialog {{
+                background-color: {Colors.BASE};
+                color: {Colors.TEXT};
+            }}
+            QLabel {{
+                color: {Colors.TEXT};
+            }}
+            QPushButton {{
+                background-color: {Colors.SURFACE0};
+                color: {Colors.TEXT};
+                border: none;
+                padding: 5px 15px;
+                border-radius: 4px;
+            }}
+            QPushButton:hover {{
+                background-color: {Colors.SURFACE1};
+            }}
+            QProgressBar {{
+                border: 2px solid {Colors.SURFACE0};
+                border-radius: 5px;
+                text-align: center;
+                background-color: {Colors.SURFACE0};
+                color: {Colors.TEXT};
+            }}
+            QProgressBar::chunk {{
+                background-color: {Colors.BLUE};
+                border-radius: 3px;
+            }}
+        """)
+        self._download_dialog.canceled.connect(self._on_download_canceled)
+        self._download_dialog.show()
+
+        # 启动下载 Worker
+        self._download_worker = DownloadUpdateWorker(download_url, save_path)
+        self._download_worker.progress.connect(self._on_download_progress)
+        self._download_worker.finished.connect(self._on_download_finished)
+        self._download_worker.start()
+
+    def _on_download_progress(self, downloaded, total, percentage):
+        """下载进度更新"""
+        if hasattr(self, '_download_dialog') and self._download_dialog:
+            downloaded_mb = downloaded / (1024 * 1024)
+            if total and total > 0:
+                total_mb = total / (1024 * 1024)
+                label_text = f"正在下载更新...\n{downloaded_mb:.1f} MB / {total_mb:.1f} MB ({percentage}%)"
+                self._download_dialog.setRange(0, 100)
+                self._download_dialog.setValue(percentage)
+            else:
+                label_text = f"正在下载更新...\n已下载 {downloaded_mb:.1f} MB（服务器未返回总大小）"
+                self._download_dialog.setRange(0, 0)
+            self._download_dialog.setLabelText(label_text)
+
+    def _on_download_finished(self, file_path, error):
+        """下载完成回调"""
+        # 关闭进度对话框
+        if hasattr(self, '_download_dialog') and self._download_dialog:
+            self._download_dialog.close()
+
+        if error:
+            QMessageBox.warning(self, "下载失败", f"更新下载失败\n\n{error}")
+            return
+
+        if not file_path or not os.path.exists(file_path):
+            QMessageBox.warning(self, "下载失败", "文件下载失败，请稍后重试")
+            return
+
+        # 下载成功，询问是否立即安装
+        reply = QMessageBox.question(
+            self, "下载完成",
+            f"更新已下载完成！\n\n文件位置: {file_path}\n\n是否立即打开安装程序？\n"
+            "程序会先保存账号和待选课程，然后停止监控并自动退出。",
+            QMessageBox.Yes | QMessageBox.No
+        )
+
+        if reply == QMessageBox.Yes:
+            try:
+                # 更新前持久化账号配置和待选课程，并停止守护进程。
+                self._installing_update = True
+                self._update_resume_monitoring = (
+                    self.multi_grab_worker is not None
+                    and self.multi_grab_worker.isRunning()
+                )
+                self.save_config()
+                self.save_monitor_state(is_monitoring=self._update_resume_monitoring)
+                self.write_watchdog_signal('stop')
+                if self.multi_grab_worker:
+                    if not self.stop_monitoring(clear_state=False, reason='update'):
+                        raise RuntimeError("监控线程尚未完全停止，请稍后重试安装")
+
+                # 打开安装程序
+                if sys.platform == 'win32':
+                    os.startfile(file_path)
+                else:
+                    subprocess.Popen(['xdg-open', file_path])
+                QTimer.singleShot(500, QApplication.instance().quit)
+            except Exception as e:
+                self._installing_update = False
+                QMessageBox.warning(self, "打开失败", f"无法打开安装程序\n\n{str(e)}\n\n请手动打开: {file_path}")
+
+    def _on_download_canceled(self):
+        """用户取消下载"""
+        if hasattr(self, '_download_worker') and self._download_worker:
+            self._download_worker.cancel()
+            try:
+                self._download_worker.finished.disconnect()
+            except TypeError:
+                pass
     
     def _show_about_dialog(self):
         """显示关于对话框"""
@@ -1413,8 +1738,8 @@ class MainWindow(QMainWindow):
     
     def load_config(self):
         try:
-            with open('xk_spider/config.json', 'r', encoding='utf-8') as f:
-                config = json.load(f)
+            config = read_json(CONFIG_FILE, {})
+            if config:
                 self.username_input.setText(config.get('username', ''))
                 self.password_input.setText(config.get('password', ''))
                 
@@ -1424,6 +1749,16 @@ class MainWindow(QMainWindow):
                 self.serverchan_checkbox.setChecked(self.serverchan_enabled)
                 self.serverchan_key_input.setText(self.serverchan_key)
                 self.serverchan_key_input.setVisible(self.serverchan_enabled)
+
+                self.developer_mode_enabled = config.get('developer_mode_enabled', False)
+                self.feedback_url = str(config.get('feedback_url', '') or '').strip()
+                self.developer_webhooks = normalize_webhook_channels(
+                    config.get('developer_webhooks', [])
+                )
+                if not self.developer_webhooks and self.feedback_url:
+                    migrated = make_legacy_feedback_channel(self.feedback_url)
+                    if migrated:
+                        self.developer_webhooks = [migrated]
         except:
             pass
     
@@ -1437,13 +1772,14 @@ class MainWindow(QMainWindow):
             'password': self.password_input.text(),
             'serverchan_enabled': self.serverchan_enabled,
             'serverchan_key': self.serverchan_key if self.serverchan_enabled else '',
+            'developer_mode_enabled': self.developer_mode_enabled,
+            'feedback_url': self.feedback_url,
+            'developer_webhooks': self.developer_webhooks,
         }
         try:
-            os.makedirs('xk_spider', exist_ok=True)
-            with open('xk_spider/config.json', 'w', encoding='utf-8') as f:
-                json.dump(config, f, ensure_ascii=False, indent=2)
-        except:
-            pass
+            write_json_atomic(CONFIG_FILE, config)
+        except Exception as e:
+            self._logger.error(f"保存账号配置失败: {e}")
 
     def save_monitor_state(self, is_monitoring=False):
         """保存监控状态到文件（用于闪退恢复）"""
@@ -1452,41 +1788,58 @@ class MainWindow(QMainWindow):
             'courses': [],
             'course_type': self.course_type_combo.currentText(),
             'concurrency': self.concurrency_spin.value(),
+            'conflict_policy': self._active_conflict_policy if is_monitoring else None,
             'timestamp': time.time(),
         }
         
-        if is_monitoring:
-            # 保存待抢课程列表
-            for i in range(self.grab_list.count()):
-                item = self.grab_list.item(i)
-                course = item.data(Qt.UserRole)
-                if course:
-                    state['courses'].append(course)
+        # 无论是否正在监控，都保存待选课程列表。
+        for i in range(self.grab_list.count()):
+            item = self.grab_list.item(i)
+            course = item.data(Qt.UserRole)
+            if course:
+                state['courses'].append(course)
         
         try:
-            os.makedirs('xk_spider', exist_ok=True)
-            with open(MONITOR_STATE_FILE, 'w', encoding='utf-8') as f:
-                json.dump(state, f, ensure_ascii=False, indent=2)
+            write_json_atomic(MONITOR_STATE_FILE, state)
         except Exception as e:
             self._logger.error(f"保存监控状态失败: {e}")
 
     def load_monitor_state(self):
         """加载监控状态文件"""
-        try:
-            if os.path.exists(MONITOR_STATE_FILE):
-                with open(MONITOR_STATE_FILE, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-        except Exception as e:
-            self._logger.error(f"加载监控状态失败: {e}")
-        return None
+        return read_json(MONITOR_STATE_FILE)
+
+    def _restore_saved_watchlist(self, state):
+        """恢复上次保存的待选课程和界面设置，但不自动开始监控。"""
+        course_type = state.get('course_type', '')
+        index = self.course_type_combo.findText(course_type)
+        if index >= 0:
+            self.course_type_combo.blockSignals(True)
+            self.course_type_combo.setCurrentIndex(index)
+            self.course_type_combo.blockSignals(False)
+
+        if 'concurrency' in state:
+            self.concurrency_spin.setValue(state['concurrency'])
+
+        existing_ids = {
+            self.grab_list.item(i).data(Qt.UserRole).get('JXBID', '')
+            for i in range(self.grab_list.count())
+            if self.grab_list.item(i).data(Qt.UserRole)
+        }
+        for course in state.get('courses', []):
+            if not isinstance(course, dict):
+                continue
+            tc_id = course.get('JXBID', '')
+            if not tc_id or tc_id in existing_ids:
+                continue
+            item = QListWidgetItem(self._build_grab_item_text(course))
+            item.setData(Qt.UserRole, course)
+            self.grab_list.addItem(item)
+            existing_ids.add(tc_id)
+        self.grab_count_label.setText(f"待抢: {self.grab_list.count()} 门")
 
     def clear_monitor_state(self):
-        """清除监控状态文件"""
-        try:
-            if os.path.exists(MONITOR_STATE_FILE):
-                os.remove(MONITOR_STATE_FILE)
-        except Exception:
-            pass
+        """仅清除自动恢复标记，保留待选课程。"""
+        self.save_monitor_state(is_monitoring=False)
 
     def write_watchdog_signal(self, action, pid=None):
         """写入 watchdog 信号文件"""
@@ -1498,9 +1851,7 @@ class MainWindow(QMainWindow):
             signal_data['pid'] = pid
 
         try:
-            os.makedirs(os.path.dirname(WATCHDOG_SIGNAL_FILE), exist_ok=True)
-            with open(WATCHDOG_SIGNAL_FILE, 'w', encoding='utf-8') as f:
-                json.dump(signal_data, f, ensure_ascii=False, indent=2)
+            write_json_atomic(WATCHDOG_SIGNAL_FILE, signal_data)
         except Exception as e:
             self._logger.error(f"写入 watchdog 信号失败: {e}")
 
@@ -1523,7 +1874,7 @@ class MainWindow(QMainWindow):
                     cwd=base_dir
                 )
             else:
-                base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+                base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
                 watchdog_script = os.path.join(base_dir, 'run_watchdog.py')
                 if not os.path.exists(watchdog_script):
                     self._logger.warning(f"run_watchdog.py 不存在: {watchdog_script}")
@@ -1563,6 +1914,8 @@ class MainWindow(QMainWindow):
         password = self.password_input.text().strip()
         
         if not username or not password:
+            missing = "账号和密码" if not username and not password else "账号" if not username else "密码"
+            self._logger.warning(f"登录输入检查失败：未填写{missing}")
             QMessageBox.warning(self, "提示", "请输入学号和密码")
             self._is_manual_login_attempt = False
             return
@@ -1638,11 +1991,22 @@ class MainWindow(QMainWindow):
                     self.grab_list.addItem(item)
             
             self.grab_count_label.setText(f"待抢: {self.grab_list.count()} 门")
+            restored_conflict_policy = self._pending_restore_state.get('conflict_policy')
+            self._active_conflict_policy = (
+                restored_conflict_policy if isinstance(restored_conflict_policy, dict)
+                else None
+            )
             self._pending_restore_state = None
-            
+	            
             # 自动开始监控
             self.log("[INFO] 自动恢复监控中...")
-            QTimer.singleShot(1000, self.start_monitoring)
+            QTimer.singleShot(
+                1000,
+                lambda policy=restored_conflict_policy: self.start_monitoring(
+                    conflict_policy=policy,
+                    skip_policy_dialog=True
+                )
+            )
         elif self._pending_monitor_courses:
             self.log(f"[INFO] 检测到 {len(self._pending_monitor_courses)} 门待恢复课程")
             QTimer.singleShot(1000, self._resume_monitoring)
@@ -1655,7 +2019,12 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         self.log(f"[ERROR] 登录失败: {msg}")
 
-        if self._is_manual_login_attempt:
+        credentials_error = '登录名或密码不正确' in str(msg)
+        if self._is_manual_login_attempt and credentials_error:
+            self._manual_login_fail_count = 0
+            QMessageBox.warning(self, "登录失败", "登录名或密码不正确，请检查后重试。")
+            self.statusBar().showMessage("登录名或密码不正确")
+        elif self._is_manual_login_attempt:
             self._manual_login_fail_count += 1
             remain = 5 - self._manual_login_fail_count
             if remain > 0:
@@ -2019,6 +2388,10 @@ class MainWindow(QMainWindow):
         
         if self.multi_grab_worker and self.multi_grab_worker.isRunning():
             self.multi_grab_worker.add_course(course)
+        self.save_monitor_state(
+            is_monitoring=self.multi_grab_worker is not None
+            and self.multi_grab_worker.isRunning()
+        )
     
     def show_grab_context_menu(self, pos):
         item = self.grab_list.itemAt(pos)
@@ -2041,8 +2414,270 @@ class MainWindow(QMainWindow):
                 self.multi_grab_worker.remove_course(tc_id)
             
             self.log(f"[INFO] 移除待抢: {course.get('KCM', '')}")
+            self.save_monitor_state(
+                is_monitoring=self.multi_grab_worker is not None
+                and self.multi_grab_worker.isRunning()
+            )
 
-    def start_monitoring(self):
+    def _course_time_text(self, course):
+        return (
+            course.get('SKSJ', '')
+            or course.get('classTime', '')
+            or course.get('time', '')
+            or course.get('teachingTime', '')
+            or ''
+        )
+
+    def _parse_time_slots(self, time_str):
+        if not time_str:
+            return []
+
+        slots = []
+        segments = re.split(r'[,;，；/]', str(time_str))
+        day_map = {
+            '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '日': 7, '天': 7,
+            '1': 1, '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7,
+        }
+
+        for segment in segments:
+            segment = segment.strip()
+            if not segment:
+                continue
+
+            slot = {'weeks': set(), 'day': 0, 'periods': set()}
+
+            week_match = re.search(r'第?(\d+)-(\d+)周(?:\(([单双])\))?', segment)
+            if week_match:
+                start_week = int(week_match.group(1))
+                end_week = int(week_match.group(2))
+                odd_even = week_match.group(3)
+                for week in range(start_week, end_week + 1):
+                    if odd_even == '单' and week % 2 == 0:
+                        continue
+                    if odd_even == '双' and week % 2 == 1:
+                        continue
+                    slot['weeks'].add(week)
+            else:
+                single_week = re.search(r'第?(\d+)周', segment)
+                if single_week:
+                    slot['weeks'].add(int(single_week.group(1)))
+
+            day_match = re.search(r'(?:星期|周|礼拜)([一二三四五六日天1-7])', segment)
+            if day_match:
+                slot['day'] = day_map.get(day_match.group(1), 0)
+
+            period_match = re.search(r'第?(\d+)-(\d+)节', segment)
+            if period_match:
+                start_period = int(period_match.group(1))
+                end_period = int(period_match.group(2))
+                for period in range(start_period, end_period + 1):
+                    slot['periods'].add(period)
+            else:
+                period_singles = re.findall(r'第(\d+)节', segment)
+                if period_singles:
+                    for period in period_singles:
+                        slot['periods'].add(int(period))
+                else:
+                    period_singles = re.findall(r'(\d+)节', segment)
+                    for period in period_singles:
+                        slot['periods'].add(int(period))
+                    comma_periods = re.search(r'(\d+(?:,\d+)+)节', segment)
+                    if comma_periods:
+                        for period in comma_periods.group(1).split(','):
+                            if period.strip():
+                                slot['periods'].add(int(period.strip()))
+
+            if slot['weeks'] and slot['day'] and slot['periods']:
+                slots.append(slot)
+            elif slot['day'] and slot['periods']:
+                slot['weeks'] = set(range(1, 19))
+                slots.append(slot)
+
+        return slots
+
+    def _check_time_conflict(self, time_str1, time_str2):
+        slots1 = self._parse_time_slots(time_str1)
+        slots2 = self._parse_time_slots(time_str2)
+        if not slots1 or not slots2:
+            return False
+
+        for slot1 in slots1:
+            for slot2 in slots2:
+                if slot1['day'] != slot2['day']:
+                    continue
+                if not (slot1['weeks'] & slot2['weeks']):
+                    continue
+                if slot1['periods'] & slot2['periods']:
+                    return True
+        return False
+
+    def _build_pending_conflict_groups(self, courses):
+        """按待抢课程之间的时间冲突构建连通冲突组。"""
+        indexed = []
+        for index, course in enumerate(courses):
+            tc_id = str(course.get('JXBID', '') or '')
+            time_text = self._course_time_text(course)
+            if tc_id and time_text:
+                indexed.append((index, course, tc_id, time_text))
+
+        edges = {item[2]: set() for item in indexed}
+        course_by_id = {item[2]: item[1] for item in indexed}
+        for left_pos in range(len(indexed)):
+            _, left_course, left_id, left_time = indexed[left_pos]
+            for right_pos in range(left_pos + 1, len(indexed)):
+                _, right_course, right_id, right_time = indexed[right_pos]
+                if self._check_time_conflict(left_time, right_time):
+                    edges[left_id].add(right_id)
+                    edges[right_id].add(left_id)
+
+        groups = []
+        visited = set()
+        for tc_id in edges:
+            if tc_id in visited or not edges[tc_id]:
+                continue
+            stack = [tc_id]
+            component = []
+            visited.add(tc_id)
+            while stack:
+                current = stack.pop()
+                component.append(course_by_id[current])
+                for neighbor in edges[current]:
+                    if neighbor not in visited:
+                        visited.add(neighbor)
+                        stack.append(neighbor)
+            if len(component) >= 2:
+                groups.append(component)
+        return groups
+
+    def _show_pending_conflict_policy_dialog(self, groups):
+        """提示待抢列表内部冲突，并让用户选择每组首选课程。"""
+        if not groups:
+            return {"enabled": True, "groups": []}
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("⚠️ 待抢列表内部冲突")
+        dialog.setMinimumWidth(760)
+        dialog.setMinimumHeight(520)
+
+        layout = QVBoxLayout(dialog)
+        intro = QLabel(
+            "检测到待抢列表里有课程之间时间互相冲突。\n\n"
+            "默认安全策略：同一冲突组里，只要任意一门抢成功，就自动停止本组其它待抢课程，"
+            "避免程序后续又把刚抢到的课当作冲突课退掉。\n\n"
+            "如果你给某组选择了“首选优先级”：非首选课程先抢到时，首选课程仍会继续监控；"
+            "后续首选课程出现余量时，可能触发自动换课。注意：换课需要先退旧课再抢新课，"
+            "不能保证一定抢到或一定回滚成功，请慎重选择。"
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        container = QWidget()
+        container_layout = QVBoxLayout(container)
+        combo_records = []
+
+        for index, group in enumerate(groups, start=1):
+            frame = QFrame()
+            frame.setStyleSheet(f"""
+                QFrame {{
+                    background-color: {Colors.SURFACE0};
+                    border: 1px solid {Colors.SURFACE2};
+                    border-radius: 10px;
+                    padding: 8px;
+                }}
+            """)
+            frame_layout = QVBoxLayout(frame)
+            title = QLabel(f"冲突组 {index}")
+            title.setStyleSheet(f"font-weight: bold; color: {Colors.YELLOW};")
+            frame_layout.addWidget(title)
+
+            detail_lines = []
+            for course in group:
+                course_name = course.get('KCM', '') or '未知课程'
+                teacher = course.get('SKJS', '') or '未知教师'
+                time_text = self._course_time_text(course) or '时间未知'
+                detail_lines.append(f"• {course_name} - {teacher}｜{time_text}")
+            detail = QLabel("\n".join(detail_lines))
+            detail.setWordWrap(True)
+            frame_layout.addWidget(detail)
+
+            combo = QComboBox()
+            combo.addItem("默认：抢到任意一门就停止本组其它课程", "")
+            for course in group:
+                course_name = course.get('KCM', '') or '未知课程'
+                teacher = course.get('SKJS', '') or '未知教师'
+                combo.addItem(f"首选：{course_name} - {teacher}", str(course.get('JXBID', '') or ''))
+            frame_layout.addWidget(combo)
+            combo_records.append((index, group, combo))
+            container_layout.addWidget(frame)
+
+        container_layout.addStretch(1)
+        scroll.setWidget(container)
+        layout.addWidget(scroll, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("按此策略开始监控")
+        buttons.button(QDialogButtonBox.Cancel).setText("取消")
+        layout.addWidget(buttons)
+
+        result = {"accepted": False, "policy": None}
+
+        def accept_policy():
+            policy_groups = []
+            for index, group, combo in combo_records:
+                preferred_id = str(combo.currentData() or '')
+                preferred_name = ''
+                for course in group:
+                    if str(course.get('JXBID', '') or '') == preferred_id:
+                        preferred_name = course.get('KCM', '') or '未知课程'
+                        break
+                policy_groups.append({
+                    "id": f"pending_conflict_group_{index}",
+                    "course_ids": [str(course.get('JXBID', '') or '') for course in group],
+                    "preferred_id": preferred_id,
+                    "preferred_name": preferred_name,
+                })
+            result["accepted"] = True
+            result["policy"] = {"enabled": True, "groups": policy_groups}
+            dialog.accept()
+
+        buttons.accepted.connect(accept_policy)
+        buttons.rejected.connect(dialog.reject)
+        dialog.exec_()
+
+        if not result["accepted"]:
+            return None
+        return result["policy"]
+
+    def _build_default_conflict_policy(self, groups):
+        """为静默恢复构建默认冲突组策略：抢到任意一门即停止本组其它课程。"""
+        policy_groups = []
+        for index, group in enumerate(groups, start=1):
+            policy_groups.append({
+                "id": f"pending_conflict_group_{index}",
+                "course_ids": [str(course.get('JXBID', '') or '') for course in group],
+                "preferred_id": "",
+                "preferred_name": "",
+            })
+        return {"enabled": True, "groups": policy_groups}
+
+    def _log_conflict_policy(self, conflict_policy, restored=False):
+        groups = conflict_policy.get('groups', []) if isinstance(conflict_policy, dict) else []
+        if not groups:
+            return
+        prefix = "恢复待抢冲突组策略" if restored else "待抢冲突组策略"
+        for group in groups:
+            preferred_name = group.get('preferred_name') or ''
+            if preferred_name:
+                self.log(
+                    f"[INFO] {prefix}: 首选 {preferred_name}；"
+                    "非首选先成功时首选继续监控"
+                )
+            else:
+                self.log(f"[INFO] {prefix}: 默认抢到任意一门即停止本组其它课程")
+
+    def start_monitoring(self, conflict_policy=None, skip_policy_dialog=False):
         if not self.is_logged_in:
             QMessageBox.warning(self, "提示", "请先登录")
             return
@@ -2057,17 +2692,71 @@ class MainWindow(QMainWindow):
             course = item.data(Qt.UserRole)
             if course:
                 courses.append(course)
+
+        pending_conflict_groups = self._build_pending_conflict_groups(courses)
+        if skip_policy_dialog:
+            if not isinstance(conflict_policy, dict):
+                conflict_policy = self._build_default_conflict_policy(pending_conflict_groups)
+                if conflict_policy.get('groups'):
+                    self.log("[WARN] 未找到上次冲突组策略，恢复时按默认安全策略继续监控")
+            else:
+                self.log("[INFO] 已复用上次待抢冲突组策略，恢复监控不再弹窗确认")
+            self._log_conflict_policy(conflict_policy, restored=True)
+        else:
+            conflict_policy = self._show_pending_conflict_policy_dialog(pending_conflict_groups)
+            if conflict_policy is None:
+                self.log("[INFO] 用户取消启动：未确认待抢列表内部冲突策略")
+                return
+            self._log_conflict_policy(conflict_policy)
+
+        self._active_conflict_policy = conflict_policy
+
+        conflict_courses = [
+            course for course in courses
+            if self._to_bool(course.get('isConflict', False))
+            or bool(str(course.get('conflictDesc', '') or '').strip())
+        ]
+        if conflict_courses:
+            names = [str(course.get('KCM', '') or '未知课程') for course in conflict_courses]
+            preview = '、'.join(names[:5])
+            if len(names) > 5:
+                preview += f" 等 {len(names)} 门"
+            reply = QMessageBox.warning(
+                self,
+                "⚠️ 冲突换课风险确认",
+                f"检测到待选课程与当前已选课程存在时间冲突：\n\n{preview}\n\n"
+                "自动换课需要先退掉冲突的旧课程，再尝试选择目标课程。"
+                "在多人同时抢课、旧课名额被他人占用或网络异常时，"
+                "目标课程可能抢不到，旧课程也无法保证回滚成功。\n\n"
+                "请确认你已理解风险，并慎重决定是否继续监控。",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                self.log("[INFO] 用户取消启动：未接受冲突换课风险")
+                return
         
         # 获取 Server酱 key
         serverchan_key = ''
         if self.serverchan_enabled:
             serverchan_key = self.serverchan_key_input.text().strip()
             self.serverchan_key = serverchan_key
-        
-        self.log(f"[INFO] 开始监控 {len(courses)} 门课程 (并发: {self.concurrency_spin.value()})")
+
+        webhook_channels = []
+        if self.developer_mode_enabled:
+            valid, error = validate_webhook_channels(self.developer_webhooks)
+            if valid:
+                webhook_channels = normalize_webhook_channels(self.developer_webhooks)
+            else:
+                self.log(f"[WARN] 自定义 Webhook 配置无效，本次未启用: {error}")
+	        
+        self.log(f"[INFO] 开始监控 {len(courses)} 门课程 (HTTP并发: {self.concurrency_spin.value()})")
         if serverchan_key:
             self.log(f"[INFO] Server酱通知已启用")
-        
+        if webhook_channels:
+            enabled_count = sum(1 for item in webhook_channels if item.get('enabled', True))
+            self.log(f"[INFO] 开发者模式自定义 Webhook 已启用，启用通道: {enabled_count}")
+	        
         self.multi_grab_worker = MultiGrabWorker(
             courses=courses,
             student_code=self.student_code,
@@ -2078,7 +2767,9 @@ class MainWindow(QMainWindow):
             username=self.username_input.text(),
             password=self.password_input.text(),
             max_workers=self.concurrency_spin.value(),
-            serverchan_key=serverchan_key
+            serverchan_key=serverchan_key,
+            webhook_channels=webhook_channels,
+            conflict_policy=conflict_policy,
         )
         
         self.multi_grab_worker.success.connect(self.on_grab_success)
@@ -2089,6 +2780,7 @@ class MainWindow(QMainWindow):
         self.multi_grab_worker.session_updated.connect(self.on_session_updated)
         self.multi_grab_worker.finished.connect(self.on_worker_finished)
         self.multi_grab_worker.heartbeat.connect(self.update_heartbeat)
+        self.multi_grab_worker.courses_retired.connect(self.on_courses_retired)
 
         # 写入守护信号并按需启动 watchdog
         self.write_watchdog_signal('start', pid=os.getpid())
@@ -2120,7 +2812,11 @@ class MainWindow(QMainWindow):
 
         if self.multi_grab_worker:
             self.multi_grab_worker.stop()
-            self.multi_grab_worker.wait(2000)
+            wait_ms = 10000 if reason == 'update' else 5000
+            if not self.multi_grab_worker.wait(wait_ms):
+                self._logger.warning(f"停止监控超时: reason={reason}")
+                if reason == 'update':
+                    return False
             self.multi_grab_worker = None
         
         self.start_grab_btn.setEnabled(True)
@@ -2152,6 +2848,9 @@ class MainWindow(QMainWindow):
         elif reason == 'close':
             # 关闭程序时不追加停止日志，避免与手动停止混淆
             pass
+        elif reason == 'update':
+            self.statusBar().showMessage("🔄 正在退出并安装更新")
+            self.log("[INFO] 更新安装前已停止监控")
         else:
             self.statusBar().showMessage("⏹ 监控已停止")
             self.log("[INFO] 监控已停止")
@@ -2160,6 +2859,9 @@ class MainWindow(QMainWindow):
         if clear_state:
             self.write_watchdog_signal('stop')
             self.clear_monitor_state()
+            if reason not in ('relogin',):
+                self._active_conflict_policy = None
+        return True
     
     def on_grab_success(self, msg, course):
         """抢课成功回调 - 带异常保护"""
@@ -2174,10 +2876,38 @@ class MainWindow(QMainWindow):
                     break
             
             self.grab_count_label.setText(f"待抢: {self.grab_list.count()} 门")
+            self.save_monitor_state(
+                is_monitoring=self.multi_grab_worker is not None
+                and self.multi_grab_worker.isRunning()
+            )
             QMessageBox.information(self, "🎉 抢课成功", msg)
         except Exception as e:
             try:
                 self._logger.error(f"on_grab_success 异常: {str(e)[:50]}")
+            except Exception:
+                pass
+
+    def on_courses_retired(self, tc_ids, reason):
+        """worker 自动停止冲突待抢课程后，同步刷新 UI 列表。"""
+        try:
+            remove_ids = {str(tc_id) for tc_id in (tc_ids or [])}
+            if not remove_ids:
+                return
+            for i in range(self.grab_list.count() - 1, -1, -1):
+                item = self.grab_list.item(i)
+                course = item.data(Qt.UserRole) if item else None
+                if course and str(course.get('JXBID', '') or '') in remove_ids:
+                    self.grab_list.takeItem(i)
+
+            self.grab_count_label.setText(f"待抢: {self.grab_list.count()} 门")
+            self.log(f"[INFO] {reason}")
+            self.save_monitor_state(
+                is_monitoring=self.multi_grab_worker is not None
+                and self.multi_grab_worker.isRunning()
+            )
+        except Exception as e:
+            try:
+                self._logger.error(f"on_courses_retired 异常: {str(e)[:50]}")
             except Exception:
                 pass
     
@@ -2233,9 +2963,10 @@ class MainWindow(QMainWindow):
                     pending_courses.append(course)
             
             self._pending_monitor_courses = pending_courses
+            self._pending_resume_conflict_policy = self._active_conflict_policy
             self.log(f"[INFO] 已保存 {len(pending_courses)} 门待抢课程")
-            
-            self.stop_monitoring(reason='relogin')
+	            
+            self.stop_monitoring(clear_state=False, reason='relogin')
             self._auto_relogin_and_resume()
         except Exception as e:
             try:
@@ -2269,6 +3000,12 @@ class MainWindow(QMainWindow):
         self.login_btn.setText("🚀 一键登录")
         self.progress_bar.setVisible(False)
         self.log(f"[ERROR] 自动重登失败: {msg}")
+        if '登录名或密码不正确' in str(msg):
+            self._auto_relogin_retry_count = 0
+            self.save_monitor_state(is_monitoring=False)
+            self.statusBar().showMessage("自动重登已停止：请重新输入正确的账号密码")
+            QMessageBox.warning(self, "自动重登已停止", "保存的账号或密码不正确，请修改后重新登录。")
+            return
         self._auto_relogin_retry_count += 1
         retry_delay_ms = min(10000, 2000 * self._auto_relogin_retry_count)
         self.log(f"[INFO] {retry_delay_ms // 1000}s 后自动重试重登 (第 {self._auto_relogin_retry_count} 次)")
@@ -2299,8 +3036,16 @@ class MainWindow(QMainWindow):
         
         self.grab_count_label.setText(f"待抢: {self.grab_list.count()} 门")
         self._pending_monitor_courses = []
-        
-        QTimer.singleShot(500, self.start_monitoring)
+	        
+        resume_policy = self._pending_resume_conflict_policy or self._active_conflict_policy
+        self._pending_resume_conflict_policy = None
+        QTimer.singleShot(
+            500,
+            lambda policy=resume_policy: self.start_monitoring(
+                conflict_policy=policy,
+                skip_policy_dialog=True
+            )
+        )
     
     def on_course_available(self, course_name, teacher, remain, capacity):
         self.log(f"[ALERT] 🎉 {course_name} 有余量！余={remain}/{capacity}")
@@ -2322,6 +3067,12 @@ class MainWindow(QMainWindow):
     
     def closeEvent(self, event):
         """程序关闭事件"""
+        if self._installing_update:
+            # 更新流程已经保存过状态并停止 Watchdog，避免把恢复标记覆盖为 False。
+            self.save_config()
+            event.accept()
+            return
+
         # 保存监控状态（如果正在监控中则标记 is_monitoring=True，用于重启恢复）
         is_monitoring = self.multi_grab_worker is not None and self.multi_grab_worker.isRunning()
         self.save_monitor_state(is_monitoring=is_monitoring)

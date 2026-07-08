@@ -9,11 +9,14 @@
 import os
 import sys
 import time
-import json
 import glob
 import subprocess
 import psutil
 from datetime import datetime, timedelta
+from xk_spider.storage import (
+    LOG_DIR, WATCHDOG_LOCK_FILE, WATCHDOG_SIGNAL_FILE,
+    read_json, write_json_atomic,
+)
 
 
 # 配置
@@ -38,18 +41,17 @@ def get_paths():
     """获取各种文件路径"""
     base = get_base_dir()
     if getattr(sys, 'frozen', False):
-        # 打包模式：使用相对路径（与主程序一致）
         return {
-            'signal': os.path.join(base, 'xk_spider', 'watchdog_signal.json'),
-            'lock': os.path.join(base, 'xk_spider', 'watchdog.lock'),
-            'log_dir': os.path.join(base, 'logs'),
+            'signal': str(WATCHDOG_SIGNAL_FILE),
+            'lock': str(WATCHDOG_LOCK_FILE),
+            'log_dir': str(LOG_DIR),
             'main_exe': os.path.join(base, 'YNU选课助手Pro.exe'),
         }
     else:
         return {
-            'signal': os.path.join(base, 'xk_spider', 'watchdog_signal.json'),
-            'lock': os.path.join(base, 'xk_spider', 'watchdog.lock'),
-            'log_dir': os.path.join(base, 'logs'),
+            'signal': str(WATCHDOG_SIGNAL_FILE),
+            'lock': str(WATCHDOG_LOCK_FILE),
+            'log_dir': str(LOG_DIR),
             'main_exe': os.path.join(base, 'run_gui.py'),
         }
 
@@ -155,9 +157,8 @@ def load_signal():
     try:
         paths = get_paths()
         signal_file = paths.get('signal')
-        if signal_file and os.path.exists(signal_file):
-            with open(signal_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
+        if signal_file:
+            return read_json(signal_file)
     except Exception as e:
         log(f"读取信号文件失败: {e}")
     return None
@@ -170,9 +171,7 @@ def save_signal(signal_data):
         signal_file = paths.get('signal')
         if not signal_file:
             return
-        os.makedirs(os.path.dirname(signal_file), exist_ok=True)
-        with open(signal_file, 'w', encoding='utf-8') as f:
-            json.dump(signal_data, f, ensure_ascii=False, indent=2)
+        write_json_atomic(signal_file, signal_data)
     except Exception as e:
         log(f"写入信号文件失败: {e}")
 

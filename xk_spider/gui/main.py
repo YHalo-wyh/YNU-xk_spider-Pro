@@ -6,7 +6,6 @@
 import sys
 import os
 import time
-import json
 import subprocess
 import traceback
 import threading
@@ -15,6 +14,7 @@ from PyQt5.QtWidgets import QApplication
 
 from .ui import MainWindow
 from .config import MONITOR_STATE_FILE
+from xk_spider.storage import CRASH_LOG_FILE, read_json
 
 
 def start_watchdog(main_pid):
@@ -96,20 +96,14 @@ def setup_exception_hook():
 
 def load_monitor_state_simple():
     """简单加载监控状态文件（不依赖 MainWindow）"""
-    try:
-        if os.path.exists(MONITOR_STATE_FILE):
-            with open(MONITOR_STATE_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-    except Exception:
-        pass
-    return None
+    return read_json(MONITOR_STATE_FILE)
 
 
 def log_crash(error):
     """记录崩溃日志"""
     try:
-        os.makedirs('xk_spider', exist_ok=True)
-        with open('xk_spider/crash.log', 'a', encoding='utf-8') as f:
+        os.makedirs(os.path.dirname(CRASH_LOG_FILE), exist_ok=True)
+        with open(CRASH_LOG_FILE, 'a', encoding='utf-8') as f:
             f.write(f"\n{'='*50}\n")
             f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 程序崩溃\n")
             f.write(f"错误: {error}\n")

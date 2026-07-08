@@ -5,5 +5,7 @@ YNU选课助手 Pro - 启动入口
 """
 
 if __name__ == '__main__':
+    from xk_spider.storage import migrate_legacy_data
+    migrate_legacy_data()
     from xk_spider.gui import main
     main()
