@@ -6,7 +6,7 @@ import sys
 import shutil
 import subprocess
 
-APP_VERSION = "v2.4.0"
+APP_VERSION = "v2.5.0"
 ARTIFACT_PREFIX = f"YNU.Pro_{APP_VERSION}"
 SETUP_FILENAME = f"{ARTIFACT_PREFIX}_Setup.exe"
 PORTABLE_FILENAME = f"{ARTIFACT_PREFIX}_Portable.zip"
@@ -133,6 +133,7 @@ def build_exe():
         
         # 隐藏导入
         "--hidden-import=PyQt5.sip",
+        "--hidden-import=PyQt5.QtSvg",
         "--hidden-import=PIL._tkinter_finder",
         "--hidden-import=certifi",
     ]

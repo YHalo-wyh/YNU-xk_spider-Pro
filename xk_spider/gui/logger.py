@@ -6,7 +6,6 @@ import os
 import sys
 import glob
 import logging
-from logging.handlers import TimedRotatingFileHandler
 from datetime import datetime, timedelta
 from xk_spider.storage import LOG_DIR as USER_LOG_DIR
 
@@ -126,20 +125,32 @@ class AppLogger:
         """清理过期日志文件"""
         try:
             cutoff_date = datetime.now() - timedelta(days=self.RETENTION_DAYS)
-            pattern = os.path.join(self.LOG_DIR, f'{self.LOG_FILE_PREFIX}_*.log')
-            
-            for log_file in glob.glob(pattern):
+            patterns = (
+                os.path.join(self.LOG_DIR, f'{self.LOG_FILE_PREFIX}_*.log'),
+                os.path.join(self.LOG_DIR, 'crash_*.log'),
+            )
+
+            for log_file in (path for pattern in patterns for path in glob.glob(pattern)):
                 try:
                     # 从文件名解析日期
                     filename = os.path.basename(log_file)
-                    # 格式: run_YYYY-MM-DD.log
-                    date_str = filename.replace(f'{self.LOG_FILE_PREFIX}_', '').replace('.log', '')
+                    # 格式: run_YYYY-MM-DD.log / crash_YYYY-MM-DD.log
+                    date_str = filename.rsplit('_', 1)[-1].replace('.log', '')
                     file_date = datetime.strptime(date_str, '%Y-%m-%d')
                     
                     if file_date < cutoff_date:
                         os.remove(log_file)
                 except (ValueError, OSError):
                     # 无法解析日期或删除失败，跳过
+                    pass
+
+            # v2.4 及更早版本使用单个 crash.log；超过保留期后也清理。
+            legacy_crash_log = os.path.join(self.LOG_DIR, 'crash.log')
+            if os.path.isfile(legacy_crash_log):
+                try:
+                    if datetime.fromtimestamp(os.path.getmtime(legacy_crash_log)) < cutoff_date:
+                        os.remove(legacy_crash_log)
+                except OSError:
                     pass
         except Exception:
             pass

@@ -1,7 +1,8 @@
-﻿!include "MUI2.nsh"
+﻿
+!include "MUI2.nsh"
 
 Name "YNU选课助手 Pro"
-OutFile "YNU.Pro_v2.4.0_Setup.exe"
+OutFile "YNU.Pro_v2.5.0_Setup.exe"
 InstallDir "$LOCALAPPDATA\YNU选课助手Pro"
 InstallDirRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\YNU选课助手Pro" "UninstallString"
 RequestExecutionLevel user

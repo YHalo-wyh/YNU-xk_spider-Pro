@@ -537,12 +537,12 @@ class LoginWorker(QThread):
                     campus_name = data.get('campusName', '未知')
                     batch_code, batch_name = self._extract_batch_from_payload(data)
                     
-                    self.status.emit(f"✓ 校区: {campus_name}")
+                    self.status.emit(f"校区: {campus_name}")
                     if batch_code:
                         if batch_name and batch_name != batch_code:
-                            self.status.emit(f"✓ 当前批次: {batch_name} ({batch_code})")
+                            self.status.emit(f"当前批次: {batch_name} ({batch_code})")
                         else:
-                            self.status.emit(f"✓ 当前批次: {batch_code}")
+                            self.status.emit(f"当前批次: {batch_code}")
                     return campus, batch_code, batch_name
         except Exception:
             self.status.emit("获取学生信息失败，稍后重试")
@@ -611,9 +611,9 @@ class LoginWorker(QThread):
             batch_code, batch_name = self._extract_batch_from_payload(result)
             if batch_code:
                 if batch_name and batch_name != batch_code:
-                    self.status.emit(f"✓ 轮次接口识别: {batch_name} ({batch_code})")
+                    self.status.emit(f"轮次接口识别: {batch_name} ({batch_code})")
                 else:
-                    self.status.emit(f"✓ 轮次接口识别: {batch_code}")
+                    self.status.emit(f"轮次接口识别: {batch_code}")
             return batch_code, batch_name
         except Exception:
             return '', ''
@@ -649,7 +649,7 @@ class LoginWorker(QThread):
             )
             
             if resp.status_code != 200:
-                self.status.emit(f"⚠️ 轮次确认 HTTP {resp.status_code}，继续登录")
+                self.status.emit(f"轮次确认 HTTP {resp.status_code}，继续登录")
                 return
             
             result = resp.json()
@@ -657,14 +657,14 @@ class LoginWorker(QThread):
             msg = str(result.get('msg', '') or '')
             
             if code == '1':
-                self.status.emit("✓ 轮次确认成功")
+                self.status.emit("轮次确认成功")
             elif msg and any(k in msg for k in ("已确认", "无需确认", "已同意", "已选择")):
-                self.status.emit("✓ 轮次已确认")
+                self.status.emit("轮次已确认")
             elif msg:
-                self.status.emit(f"⚠️ 轮次确认返回: {msg}")
+                self.status.emit(f"轮次确认返回: {msg}")
         except Exception:
             # 轮次确认失败不阻断登录，后续课程查询仍可能成功
-            self.status.emit("⚠️ 轮次确认失败，已继续登录")
+            self.status.emit("轮次确认失败，已继续登录")
     
     def _api_login_attempt(self):
         try:
@@ -782,7 +782,7 @@ class LoginWorker(QThread):
             if result == "success" and login_data:
                 token = login_data.get('token', '')
                 if token:
-                    self.status.emit(f"✓ 登录成功！{login_data.get('name', '')}")
+                    self.status.emit(f"登录成功！{login_data.get('name', '')}")
                     cookies_str = '; '.join([f"{k}={v}" for k, v in login_data['cookies'].items()])
                     student_code = login_data['number']
                     
@@ -1100,7 +1100,7 @@ class MultiGrabWorker(QThread):
         self._logger.info(f"待抢冲突组自动停止: {reason}")
         self.courses_retired.emit(removed_ids, reason)
         self._send_notifications(
-            f"🛑 已停止冲突待抢课程: {winner_name}",
+            f"已停止冲突待抢课程: {winner_name}",
             reason,
             event='conflict_target_retired',
             context=self._course_context(
@@ -1239,7 +1239,7 @@ class MultiGrabWorker(QThread):
             # 检查 302 跳转（Session 过期）
             if resp.status_code == 302:
                 self.login_status.emit(False, "Session 已过期")
-                self.status.emit("[登录] ⚠️ Session 已过期，需要重新登录")
+                self.status.emit("[登录] Session 已过期，需要重新登录")
                 self._handle_session_expired()
                 return
             
@@ -1248,23 +1248,23 @@ class MultiGrabWorker(QThread):
                 # 检查响应内容是否表示过期
                 if self._is_session_expired(result=result):
                     self.login_status.emit(False, "Session 已过期")
-                    self.status.emit("[登录] ⚠️ Session 已过期，需要重新登录")
+                    self.status.emit("[登录] Session 已过期，需要重新登录")
                     self._handle_session_expired()
                 else:
                     self.login_status.emit(True, "在线")
-                    self.status.emit("[登录] ✅ 登录状态正常")
+                    self.status.emit("[登录] 登录状态正常")
             else:
                 # 非 200 状态码，可能是服务器问题或登录过期
                 self.login_status.emit(False, f"HTTP {resp.status_code}")
-                self.status.emit(f"[登录] ⚠️ 异常状态 HTTP {resp.status_code}，尝试重登...")
+                self.status.emit(f"[登录] 异常状态 HTTP {resp.status_code}，尝试重登...")
                 self._handle_session_expired()
                 
         except requests.exceptions.Timeout:
             self.login_status.emit(False, "网络超时")
-            self.status.emit("[登录] ⚠️ 网络超时，稍后重试")
+            self.status.emit("[登录] 网络超时，稍后重试")
         except Exception as e:
             self.login_status.emit(False, f"检测失败")
-            self.status.emit(f"[登录] ❌ 检测异常: {str(e)[:50]}")
+            self.status.emit(f"[登录] 检测异常: {str(e)[:50]}")
             # 不要在这里抛出异常，避免影响主监控循环
     
     def _get_headers(self):
@@ -1362,7 +1362,7 @@ class MultiGrabWorker(QThread):
                 success, new_token, new_cookies = self._do_relogin()
                 
                 if success:
-                    self.status.emit("[自动重登] ✓ 恢复成功")
+                    self.status.emit("[自动重登] 恢复成功")
                     return True
                 
                 # 如果是密码错误等致命错误，标记永久失败
@@ -2041,7 +2041,7 @@ class MultiGrabWorker(QThread):
             is_selected = self._verify_course_selected(tc_id)
             
             if is_selected:
-                self.status.emit(f"[换课] Step 4: ✓ 换课成功！{conflict_name} → {course_name}")
+                self.status.emit(f"[换课] Step 4: 换课成功！{conflict_name} → {course_name}")
                 self._logger.info(f"换课成功: {conflict_name} → {course_name}")
                 return True, conflict_course
             elif is_selected is None:
@@ -2062,7 +2062,7 @@ class MultiGrabWorker(QThread):
 
         attempt_count = 0
 
-        self.status.emit(f"[紧急救援] 🚨 开始死磕回滚 {conflict_name}，直到成功为止...")
+        self.status.emit(f"[紧急救援] 开始持续回滚 {conflict_name}，直到成功为止...")
         self._logger.error(f"进入紧急救援模式: 尝试抢回 {conflict_name}")
         
         while self._running:
@@ -2071,7 +2071,7 @@ class MultiGrabWorker(QThread):
             # 每10次尝试更新一次状态（减少UI刷新）
             if attempt_count % 10 == 1:
                 self.status.emit(
-                    f"[紧急救援] 🔄 第{attempt_count}次尝试抢回 {conflict_name}"
+                    f"[紧急救援] 第{attempt_count}次尝试抢回 {conflict_name}"
                 )
 
             # 如果目标课选课接口曾返回成功但核实接口异常，先确认目标课是否已经在课表中。
@@ -2083,7 +2083,7 @@ class MultiGrabWorker(QThread):
                     retry_interval=0
                 )
                 if target_selected is True:
-                    self.status.emit(f"[紧急救援] ✓ 已确认目标课程 {course_name} 在课表中，停止回滚")
+                    self.status.emit(f"[紧急救援] 已确认目标课程 {course_name} 在课表中，停止回滚")
                     self._logger.info(f"安全救援确认目标课已选: {course_name}")
                     return True, conflict_course
             
@@ -2101,10 +2101,10 @@ class MultiGrabWorker(QThread):
                 is_selected = self._verify_course_selected(conflict_tc_id)
                 
                 if is_selected is True:
-                    self.status.emit(f"[紧急救援] ✓ 成功抢回 {conflict_name}！(尝试{attempt_count}次)")
+                    self.status.emit(f"[紧急救援] 成功抢回 {conflict_name}！(尝试{attempt_count}次)")
                     self._logger.info(f"紧急救援成功: {conflict_name}, 尝试次数: {attempt_count}")
                     self._send_notifications(
-                        f"✅ 回滚成功: {conflict_name}",
+                        f"回滚成功: {conflict_name}",
                         f"目标课程 {course_name} 未确认成功，已抢回原课程 {conflict_name}。尝试次数: {attempt_count}",
                         event='rollback_success',
                         context=self._course_context(
@@ -2119,10 +2119,10 @@ class MultiGrabWorker(QThread):
             
             # 检查是否因为"已选"而失败（说明已经抢回了）
             if rollback_msg and ('已选' in rollback_msg or '重复' in rollback_msg):
-                self.status.emit(f"[紧急救援] ✓ {conflict_name} 已在课表中！")
+                self.status.emit(f"[紧急救援] {conflict_name} 已在课表中！")
                 self._logger.info(f"紧急救援成功(已选): {conflict_name}")
                 self._send_notifications(
-                    f"✅ 回滚确认: {conflict_name}",
+                    f"回滚确认: {conflict_name}",
                     f"系统返回 {conflict_name} 已在课表中，回滚视为成功。",
                     event='rollback_success',
                     context=self._course_context(
@@ -2391,14 +2391,14 @@ class MultiGrabWorker(QThread):
                 # 通过安全检查！可以进入抢课流程
                 if last_remain <= 0 or state.get('last_status') != 'available':
                     self.status.emit(
-                        f"[ALERT] 🎉 {course_name} 发现余量！余={remain}/{capacity} "
+                        f"[ALERT] {course_name} 发现余量！余={remain}/{capacity} "
                         f"(isFull=False, 安全)"
                     )
                     self.course_available.emit(course_name, teacher, remain, capacity)
                     state['last_status'] = 'available'
                     
                     self._send_notifications(
-                        f"🎯 发现余量: {course_name}",
+                        f"发现余量: {course_name}",
                         f"**课程**: {course_name}\n\n**教师**: {teacher}\n\n**余量**: {remain}/{capacity}\n\n正在尝试抢课...",
                         event='course_available',
                         context=self._course_context(
@@ -2429,11 +2429,11 @@ class MultiGrabWorker(QThread):
                     if swap_success:
                         conflict_name = conflict_info.get('name', '未知') if conflict_info else '未知'
                         self.success.emit(
-                            f"🔄 换课成功: {conflict_name} → {course_name} - {teacher}", 
+                            f"换课成功: {conflict_name} → {course_name} - {teacher}",
                             course
                         )
                         self._send_notifications(
-                            f"🎉 换课成功: {course_name}",
+                            f"换课成功: {course_name}",
                             f"**新课程**: {course_name}\n\n**教师**: {teacher}\n\n**方式**: 换课成功\n\n**原课程**: {conflict_name}",
                             event='swap_success',
                             context=self._course_context(
@@ -2460,9 +2460,9 @@ class MultiGrabWorker(QThread):
                     # 核实
                     is_selected = self._verify_course_selected(tc_id)
                     if is_selected is True:
-                        self.success.emit(f"🎉 抢课成功: {course_name} - {teacher}", course)
+                        self.success.emit(f"抢课成功: {course_name} - {teacher}", course)
                         self._send_notifications(
-                            f"🎉 抢课成功: {course_name}",
+                            f"抢课成功: {course_name}",
                             f"**课程**: {course_name}\n\n**教师**: {teacher}\n\n**方式**: 正常抢课",
                             event='select_success',
                             context=self._course_context(
@@ -2492,11 +2492,11 @@ class MultiGrabWorker(QThread):
                     if swap_success:
                         conflict_name = conflict_info.get('name', '未知') if conflict_info else '未知'
                         self.success.emit(
-                            f"🔄 换课成功: {conflict_name} → {course_name} - {teacher}", 
+                            f"换课成功: {conflict_name} → {course_name} - {teacher}",
                             course
                         )
                         self._send_notifications(
-                            f"🎉 换课成功: {course_name}",
+                            f"换课成功: {course_name}",
                             f"**新课程**: {course_name}\n\n**教师**: {teacher}\n\n**方式**: 换课成功\n\n**原课程**: {conflict_name}",
                             event='swap_success',
                             context=self._course_context(
@@ -2640,7 +2640,7 @@ class MultiGrabWorker(QThread):
                     
                     if inactive_duration < 300:  # 2-5分钟：警告阶段
                         self.status.emit(
-                            f"[健康检查] ⚠️ 监控活动减少，已 {int(inactive_duration/60)} 分钟无活动 "
+                            f"[健康检查] 监控活动减少，已 {int(inactive_duration/60)} 分钟无活动 "
                             f"(警告 {consecutive_warnings}/3)"
                         )
                         self._logger.warning(f"健康检查: 监控活动减少 {int(inactive_duration)} 秒")
@@ -2649,7 +2649,7 @@ class MultiGrabWorker(QThread):
                         if recovery_attempts < max_recovery_attempts:
                             recovery_attempts += 1
                             self.status.emit(
-                                f"[健康检查] 🚨 监控可能卡死！启动自动恢复 (尝试 {recovery_attempts}/{max_recovery_attempts})"
+                                f"[健康检查] 监控可能卡死！启动自动恢复 (尝试 {recovery_attempts}/{max_recovery_attempts})"
                             )
                             self._logger.error(f"健康检查: 启动自动恢复，无活动 {int(inactive_duration)} 秒")
                             
@@ -2657,13 +2657,13 @@ class MultiGrabWorker(QThread):
                             recovery_success = self._attempt_auto_recovery()
                             
                             if recovery_success:
-                                self.status.emit("[健康检查] ✅ 自动恢复成功，监控已重启")
+                                self.status.emit("[健康检查] 自动恢复成功，监控已重启")
                                 self._logger.info("健康检查: 自动恢复成功")
                                 consecutive_warnings = 0
                                 recovery_attempts = 0
                                 self._last_activity_time = current_time
                             else:
-                                self.status.emit(f"[健康检查] ❌ 自动恢复失败 (尝试 {recovery_attempts}/{max_recovery_attempts})")
+                                self.status.emit(f"[健康检查] 自动恢复失败 (尝试 {recovery_attempts}/{max_recovery_attempts})")
                                 
                                 # 达到最大尝试次数，建议用户手动重启
                                 if recovery_attempts >= max_recovery_attempts:
@@ -2681,7 +2681,7 @@ class MultiGrabWorker(QThread):
                 else:
                     # 活动正常，重置计数器
                     if consecutive_warnings > 0:
-                        self.status.emit("[健康检查] ✅ 监控活动已恢复正常")
+                        self.status.emit("[健康检查] 监控活动已恢复正常")
                         consecutive_warnings = 0
                         recovery_attempts = 0
                 
@@ -2689,7 +2689,7 @@ class MultiGrabWorker(QThread):
                 # 检测请求计数是否在增长（防止假活动）
                 if current_request_count == last_request_count and inactive_duration > 180:
                     self.status.emit(
-                        f"[健康检查] ⚠️ 请求计数未增长，可能存在死循环 "
+                        f"[健康检查] 请求计数未增长，可能存在死循环 "
                         f"(计数: {current_request_count})"
                     )
                     self._logger.warning(f"健康检查: 请求计数停滞 {current_request_count}")
@@ -2705,7 +2705,7 @@ class MultiGrabWorker(QThread):
                 if expected_courses > 0 and active_courses < expected_courses:
                     missing_courses = expected_courses - active_courses
                     self.status.emit(
-                        f"[健康检查] ⚠️ 检测到 {missing_courses} 门课程监控线程可能已停止"
+                        f"[健康检查] 检测到 {missing_courses} 门课程监控线程可能已停止"
                     )
                     self._logger.warning(f"健康检查: 缺失监控线程 {missing_courses} 个")
                 
@@ -2713,7 +2713,7 @@ class MultiGrabWorker(QThread):
                 # 每10分钟报告一次健康状态
                 if int(current_time) % 600 == 0:  # 10分钟整点
                     self.status.emit(
-                        f"[健康检查] 📊 状态正常 | 活跃课程: {active_courses} | "
+                        f"[健康检查] 状态正常 | 活跃课程: {active_courses} | "
                         f"总请求: {current_request_count} | 运行时长: {int((current_time - self._last_activity_time)/60)}分钟"
                     )
                 
@@ -2728,22 +2728,22 @@ class MultiGrabWorker(QThread):
         返回: True=恢复成功, False=恢复失败
         """
         try:
-            self.status.emit("[自动恢复] 🔧 开始诊断和修复...")
+            self.status.emit("[自动恢复] 开始诊断和修复...")
             
             # 步骤1: 检查网络连接
             self.status.emit("[自动恢复] Step 1: 检查网络连接...")
             if not self._test_network_connectivity():
-                self.status.emit("[自动恢复] ❌ 网络连接异常，无法恢复")
+                self.status.emit("[自动恢复] 网络连接异常，无法恢复")
                 return False
             
             # 步骤2: 检查登录状态
             self.status.emit("[自动恢复] Step 2: 检查登录状态...")
             if not self._test_login_status():
-                self.status.emit("[自动恢复] 🔄 登录状态异常，尝试重新登录...")
+                self.status.emit("[自动恢复] 登录状态异常，尝试重新登录...")
                 if not self._handle_session_expired():
-                    self.status.emit("[自动恢复] ❌ 重新登录失败")
+                    self.status.emit("[自动恢复] 重新登录失败")
                     return False
-                self.status.emit("[自动恢复] ✅ 重新登录成功")
+                self.status.emit("[自动恢复] 重新登录成功")
             
             # 步骤3: 重置监控状态
             self.status.emit("[自动恢复] Step 3: 重置监控状态...")
@@ -2756,17 +2756,17 @@ class MultiGrabWorker(QThread):
                 test_course = courses_snapshot[0]
                 remain, capacity, _ = self._api_query_course_capacity(test_course)
                 if remain is not None or remain == 'session_expired':
-                    self.status.emit("[自动恢复] ✅ 课程查询测试通过")
+                    self.status.emit("[自动恢复] 课程查询测试通过")
                     return True
                 else:
-                    self.status.emit("[自动恢复] ❌ 课程查询测试失败")
+                    self.status.emit("[自动恢复] 课程查询测试失败")
                     return False
             else:
-                self.status.emit("[自动恢复] ⚠️ 无待监控课程，恢复完成")
+                self.status.emit("[自动恢复] 无待监控课程，恢复完成")
                 return True
             
         except Exception as e:
-            self.status.emit(f"[自动恢复] ❌ 恢复过程异常: {str(e)[:50]}")
+            self.status.emit(f"[自动恢复] 恢复过程异常: {str(e)[:50]}")
             self._logger.error(f"自动恢复异常: {str(e)}")
             return False
     
@@ -2820,7 +2820,7 @@ class MultiGrabWorker(QThread):
                     self._logger.info(f"清理可能卡死的课程状态: {tc_id}")
             
             if dead_courses:
-                self.status.emit(f"[自动恢复] 🧹 清理了 {len(dead_courses)} 个可能卡死的监控状态")
+                self.status.emit(f"[自动恢复] 清理了 {len(dead_courses)} 个可能卡死的监控状态")
             
         except Exception as e:
             self._logger.error(f"重置监控状态异常: {str(e)}")
