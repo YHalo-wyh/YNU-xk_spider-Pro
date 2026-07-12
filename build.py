@@ -19,6 +19,29 @@ RUNTIME_DATA_NAMES = {
 }
 
 
+def sanitize_build_environment():
+    """Keep application-local Java runtimes out of Python bundles.
+
+    PyInstaller searches every PATH directory when resolving native DLLs.  A
+    locally installed JDK ships private copies of UCRT/MSVC runtime DLLs; when
+    those copies are bundled, ONNX Runtime fails during captcha OCR startup.
+    Python and Qt must use the Windows/Python runtime copies instead.
+    """
+    original = os.environ.get("PATH", "")
+    cleaned = []
+    removed = []
+    for entry in original.split(os.pathsep):
+        normalized = entry.lower().replace('/', '\\')
+        if '\\java\\' in normalized or '\\jdk' in normalized:
+            removed.append(entry)
+            continue
+        if entry and entry not in cleaned:
+            cleaned.append(entry)
+    os.environ["PATH"] = os.pathsep.join(cleaned)
+    if removed:
+        print(f"[*] 已从打包 DLL 搜索路径排除 {len(removed)} 个 Java/JDK 目录")
+
+
 def verify_runtime_data_isolation(dist_dir):
     """确保账号配置、待选记录和日志没有进入发布产物。"""
     leaked = []
@@ -92,6 +115,7 @@ def build_exe():
     print("步骤 1: 打包为 EXE")
     print("=" * 50)
     
+    sanitize_build_environment()
     check_and_install("pyinstaller")
     
     # 检查 UPX
@@ -118,8 +142,7 @@ def build_exe():
         # Python 包由 PyInstaller 自动收集；禁止复制整个 xk_spider 目录，
         # 避免把 config.json/monitor_state.json 带入安装包。
         "--add-data=assets;assets",  # 添加 assets 文件夹（包含图标）
-        # 收集所有依赖
-        "--collect-all=ddddocr",
+        # OCR/ONNX 由独立进程加载，避免与 Qt 原生 DLL 冲突。
         "--collect-all=certifi",
         # 排除不必要的重型库
         "--exclude-module=tensorflow",
@@ -130,6 +153,10 @@ def build_exe():
         "--exclude-module=pandas",
         "--exclude-module=tkinter",
         "--exclude-module=pyinstaller",
+        "--exclude-module=ddddocr",
+        "--exclude-module=onnxruntime",
+        "--exclude-module=cv2",
+        "--exclude-module=numpy",
         
         # 隐藏导入
         "--hidden-import=PyQt5.sip",
@@ -158,6 +185,30 @@ def build_exe():
     if not os.path.exists(main_dist_dir):
         print("[ERROR] 打包失败")
         return False
+
+    print("[*] 正在打包独立验证码 OCR 进程...")
+    ocr_args = [
+        "run_ocr_helper.py",
+        "--name=OCRHelper",
+        "--onedir",
+        "--console",
+        "--noconfirm",
+        "--clean",
+        "--collect-all=ddddocr",
+        "--exclude-module=PyQt5",
+    ]
+    if upx_dir:
+        ocr_args.append(f"--upx-dir={upx_dir}")
+    run(ocr_args)
+
+    ocr_dist_dir = os.path.join("dist", "OCRHelper")
+    target_ocr_dir = os.path.join(main_dist_dir, "OCRHelperRuntime")
+    if not os.path.isfile(os.path.join(ocr_dist_dir, "OCRHelper.exe")):
+        print("[ERROR] OCRHelper.exe 打包失败")
+        return False
+    if os.path.exists(target_ocr_dir):
+        shutil.rmtree(target_ocr_dir)
+    shutil.move(ocr_dist_dir, target_ocr_dir)
 
     print("[*] 正在打包守护进程 Watchdog.exe...")
     watchdog_args = [
@@ -190,6 +241,10 @@ def build_exe():
 
     if not os.path.exists(target_watchdog_exe):
         print("[ERROR] Watchdog.exe 复制失败")
+        return False
+
+    if not os.path.exists(os.path.join(target_ocr_dir, "OCRHelper.exe")):
+        print("[ERROR] 独立 OCR 运行目录复制失败")
         return False
 
     if not verify_runtime_data_isolation(main_dist_dir):

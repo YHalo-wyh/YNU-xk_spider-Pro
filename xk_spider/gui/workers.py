@@ -19,6 +19,7 @@ from .config import (
     BASE_URL
 )
 from .utils import (
+    captcha_ocr_available, classify_captcha,
     create_ocr_instance, get_ocr_error, OCR_AVAILABLE, send_custom_webhooks,
     make_legacy_feedback_channel,
     send_notification,
@@ -388,7 +389,7 @@ class LoginWorker(QThread):
         if OCR_AVAILABLE:
             self.ocr = create_ocr_instance()
 
-        if self.ocr is None:
+        if not captcha_ocr_available(self.ocr):
             diagnostic = get_ocr_error() or "OCR instance creation returned None"
             self._logger.error(f"登录验证码组件初始化失败: {diagnostic}")
 
@@ -708,10 +709,10 @@ class LoginWorker(QThread):
             if resp_img.status_code != 200 or len(resp_img.content) < 100:
                 return None, "下载验证码失败"
             
-            if not self.ocr:
+            if not captcha_ocr_available(self.ocr):
                 return None, "ocr_unavailable"
             
-            captcha_code = self.ocr.classification(resp_img.content)
+            captcha_code = classify_captcha(resp_img.content, self.ocr)
             if not captcha_code:
                 return None, "验证码识别失败"
             
@@ -785,7 +786,7 @@ class LoginWorker(QThread):
         self.status.emit("同步服务器时间...")
         self._sync_server_time()
         
-        if self.ocr is None:
+        if not captcha_ocr_available(self.ocr):
             self.failed.emit("验证码识别组件初始化失败，请重启程序后重试。")
             return
 
@@ -2200,7 +2201,7 @@ class MultiGrabWorker(QThread):
             self._relogin_failed_permanently = True
             return False, '', ''
         
-        if not self.ocr:
+        if not captcha_ocr_available(self.ocr):
             self.status.emit("[自动重登] OCR未初始化")
             self._relogin_failed_permanently = True
             return False, '', ''
@@ -2255,7 +2256,7 @@ class MultiGrabWorker(QThread):
                     continue
                 
                 # OCR 识别
-                captcha_code = self.ocr.classification(resp_img.content)
+                captcha_code = classify_captcha(resp_img.content, self.ocr)
                 if not captcha_code:
                     continue
                 

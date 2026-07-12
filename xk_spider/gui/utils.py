@@ -3,6 +3,8 @@
 环境检查、SSL修复、OCR检测、Server酱通知推送
 """
 import os
+import subprocess
+import sys
 import threading
 import copy
 import requests
@@ -52,6 +54,57 @@ except Exception as error:
 def get_ocr_error():
     """Return a diagnostic without exposing credentials or captcha content."""
     return _ocr_import_error
+
+
+def _ocr_helper_path():
+    if not getattr(sys, 'frozen', False):
+        return ''
+    return os.path.join(
+        os.path.dirname(sys.executable), 'OCRHelperRuntime', 'OCRHelper.exe'
+    )
+
+
+def captcha_ocr_available(ocr_instance=None):
+    """Whether OCR is available in-process or in the isolated helper."""
+    return ocr_instance is not None or os.path.isfile(_ocr_helper_path())
+
+
+def classify_captcha(image_bytes, ocr_instance=None, timeout=12):
+    """Recognise one captcha while keeping Qt and ONNX in separate processes."""
+    if ocr_instance is not None:
+        return ocr_instance.classification(image_bytes)
+
+    helper = _ocr_helper_path()
+    if not os.path.isfile(helper):
+        return ''
+
+    environment = os.environ.copy()
+    for key in list(environment):
+        if key.startswith('_PYI_'):
+            environment.pop(key, None)
+    path_entries = []
+    for entry in environment.get('PATH', '').split(os.pathsep):
+        normalized = entry.lower().replace('/', '\\')
+        if 'pyqt5\\qt5\\bin' in normalized:
+            continue
+        if entry and entry not in path_entries:
+            path_entries.append(entry)
+    environment['PATH'] = os.pathsep.join(path_entries)
+
+    completed = subprocess.run(
+        [helper],
+        input=bytes(image_bytes),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+        check=False,
+        cwd=os.path.dirname(helper),
+        env=environment,
+        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+    )
+    if completed.returncode != 0:
+        return ''
+    return completed.stdout.decode('ascii', errors='ignore').strip()
 
 
 def _new_ocr_instance():
