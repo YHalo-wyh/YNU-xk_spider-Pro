@@ -19,7 +19,7 @@ from .config import (
     BASE_URL
 )
 from .utils import (
-    create_ocr_instance, OCR_AVAILABLE, send_custom_webhooks,
+    create_ocr_instance, get_ocr_error, OCR_AVAILABLE, send_custom_webhooks,
     make_legacy_feedback_channel,
     send_notification,
 )
@@ -388,6 +388,10 @@ class LoginWorker(QThread):
         if OCR_AVAILABLE:
             self.ocr = create_ocr_instance()
 
+        if self.ocr is None:
+            diagnostic = get_ocr_error() or "OCR instance creation returned None"
+            self._logger.error(f"登录验证码组件初始化失败: {diagnostic}")
+
     def _masked_username(self):
         """日志只记录脱敏账号，绝不记录密码。"""
         value = str(self.username or '').strip()
@@ -705,7 +709,7 @@ class LoginWorker(QThread):
                 return None, "下载验证码失败"
             
             if not self.ocr:
-                return None, "OCR未初始化"
+                return None, "ocr_unavailable"
             
             captcha_code = self.ocr.classification(resp_img.content)
             if not captcha_code:
@@ -764,20 +768,34 @@ class LoginWorker(QThread):
                 return None, "credentials_error"
             return None, f"error:{msg_text or '系统异常'}"
             
+        except requests.exceptions.ProxyError:
+            return None, "proxy_error"
+        except requests.exceptions.SSLError:
+            return None, "ssl_error"
         except requests.exceptions.Timeout:
-            return None, "请求超时"
+            return None, "timeout"
+        except requests.exceptions.ConnectionError:
+            return None, "connection_error"
         except Exception as e:
-            return None, f"exception:{str(e)[:50]}"
+            # Exception messages from requests may contain the full GET query,
+            # including loginName/loginPwd.  Log only the exception class.
+            return None, f"exception:{type(e).__name__}"
     
     def run(self):
         self.status.emit("同步服务器时间...")
         self._sync_server_time()
         
+        if self.ocr is None:
+            self.failed.emit("验证码识别组件初始化失败，请重启程序后重试。")
+            return
+
         max_attempts = 10
+        last_result = ''
         for attempt in range(max_attempts):
             self.status.emit(f"尝试登录 ({attempt + 1}/{max_attempts})...")
             
             login_data, result = self._api_login_attempt()
+            last_result = str(result or '')
             
             if result == "success" and login_data:
                 token = login_data.get('token', '')
@@ -817,10 +835,27 @@ class LoginWorker(QThread):
                 self.failed.emit("当前在线人数超过上限，请稍后重试。")
                 return
             else:
+                # Preserve the real, sanitised failure reason in the daily log
+                # instead of turning OCR/TLS/proxy errors into "network error".
+                self._logger.warning(
+                    f"登录尝试失败 ({attempt + 1}/{max_attempts}): {last_result}"
+                )
                 self.status.emit(f"{result}，重试...")
                 continue
-        
-        self.failed.emit("登录失败，请检查网络或稍后重试")
+
+        if last_result == 'proxy_error':
+            message = "登录连接被代理服务器中断，请检查代理直连规则后重试。"
+        elif last_result == 'ssl_error':
+            message = "登录连接证书校验失败，请检查系统时间或 HTTPS 代理。"
+        elif last_result == 'timeout':
+            message = "连接云南大学选课系统超时，请稍后重试。"
+        elif last_result == 'connection_error':
+            message = "无法连接云南大学选课系统，请检查网络后重试。"
+        elif last_result.startswith('error:'):
+            message = f"选课系统返回异常：{last_result[6:]}"
+        else:
+            message = "登录失败，请查看运行日志中的具体原因。"
+        self.failed.emit(message)
 
 
 class MultiGrabWorker(QThread):

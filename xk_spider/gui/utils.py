@@ -40,12 +40,27 @@ fix_pil_antialias()
 # ========== OCR 可用性检测 ==========
 OCR_AVAILABLE = False
 _ocr_instance = None
+_ocr_import_error = ''
 
 try:
     import ddddocr
     OCR_AVAILABLE = True
-except ImportError:
-    pass
+except Exception as error:
+    _ocr_import_error = f"{type(error).__name__}: {error}"
+
+
+def get_ocr_error():
+    """Return a diagnostic without exposing credentials or captcha content."""
+    return _ocr_import_error
+
+
+def _new_ocr_instance():
+    import ddddocr
+    try:
+        return ddddocr.DdddOcr(show_ad=False)
+    except TypeError:
+        # Compatibility with older ddddocr releases.
+        return ddddocr.DdddOcr()
 
 
 def get_ocr_instance():
@@ -55,9 +70,8 @@ def get_ocr_instance():
         return None
     if _ocr_instance is None:
         try:
-            import ddddocr
-            _ocr_instance = ddddocr.DdddOcr()
-        except:
+            _ocr_instance = _new_ocr_instance()
+        except Exception:
             return None
     return _ocr_instance
 
@@ -67,9 +81,8 @@ def create_ocr_instance():
     if not OCR_AVAILABLE:
         return None
     try:
-        import ddddocr
-        return ddddocr.DdddOcr()
-    except:
+        return _new_ocr_instance()
+    except Exception:
         return None
 
 
