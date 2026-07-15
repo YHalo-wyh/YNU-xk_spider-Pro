@@ -89,9 +89,8 @@ def start_watchdog(main_pid):
     except Exception as e:
         # 记录失败原因
         try:
-            log_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'logs')
-            os.makedirs(log_dir, exist_ok=True)
-            with open(os.path.join(log_dir, 'watchdog_start.log'), 'a', encoding='utf-8') as f:
+            os.makedirs(LOG_DIR, exist_ok=True)
+            with open(os.path.join(LOG_DIR, 'watchdog_start.log'), 'a', encoding='utf-8') as f:
                 f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 启动守护进程失败: {e}\n")
         except Exception:
             pass

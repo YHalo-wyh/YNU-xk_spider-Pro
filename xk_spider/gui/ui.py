@@ -116,6 +116,85 @@ class MotionButton(QPushButton):
     pass
 
 
+class DownloadProgressDialog(QDialog):
+    """Stable update progress layout whose percentage cannot be clipped."""
+
+    canceled = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("downloadProgressDialog")
+        self.setModal(True)
+        self.setMinimumSize(680, 230)
+        self.resize(720, 240)
+        self._finished = False
+        self._cancel_emitted = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(30, 26, 30, 22)
+        layout.setSpacing(14)
+
+        self.title_label = QLabel("正在准备下载…")
+        self.title_label.setAlignment(Qt.AlignCenter)
+        self.title_label.setWordWrap(True)
+        self.title_label.setStyleSheet("font-size: 16px; font-weight: 750;")
+        layout.addWidget(self.title_label)
+
+        self.detail_label = QLabel("0 MB / 0 MB (0%)")
+        self.detail_label.setAlignment(Qt.AlignCenter)
+        self.detail_label.setWordWrap(True)
+        self.detail_label.setStyleSheet("font-size: 14px; font-weight: 600;")
+        layout.addWidget(self.detail_label)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat("%p%")
+        self.progress_bar.setFixedHeight(32)
+        layout.addWidget(self.progress_bar)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        self.cancel_button = QPushButton("取消")
+        self.cancel_button.setObjectName("primaryButton")
+        self.cancel_button.setFixedSize(116, 42)
+        self.cancel_button.clicked.connect(self._request_cancel)
+        button_row.addWidget(self.cancel_button)
+        layout.addLayout(button_row)
+
+    def setLabelText(self, text):
+        title, separator, detail = str(text or '').partition('\n')
+        self.title_label.setText(title)
+        self.detail_label.setText(detail if separator else '')
+        self.detail_label.setVisible(bool(separator and detail))
+
+    def setRange(self, minimum, maximum):
+        self.progress_bar.setRange(minimum, maximum)
+
+    def setValue(self, value):
+        self.progress_bar.setValue(value)
+
+    def setCancelButtonText(self, text):
+        self.cancel_button.setText(str(text))
+
+    def finish_and_close(self):
+        self._finished = True
+        self.close()
+
+    def _request_cancel(self):
+        if not self._cancel_emitted:
+            self._cancel_emitted = True
+            self.canceled.emit()
+        self.reject()
+
+    def closeEvent(self, event):
+        if not self._finished and not self._cancel_emitted:
+            self._cancel_emitted = True
+            self.canceled.emit()
+        super().closeEvent(event)
+
+
 class AnimatedScheduleCard(QFrame):
     """Rounded course card with a subtle colour/border hover transition."""
 
@@ -2639,18 +2718,15 @@ class MainWindow(QMainWindow):
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
         # 创建进度对话框
-        self._download_dialog = self._prepare_dialog(QProgressDialog(self))
+        self._download_dialog = self._prepare_dialog(DownloadProgressDialog(self))
         self._download_dialog.setWindowTitle("下载更新")
         self._download_dialog.setLabelText(f"正在下载 {filename}...\n0 MB / 0 MB (0%)")
-        self._download_dialog.setMinimum(0)
-        self._download_dialog.setMaximum(100)
+        self._download_dialog.setRange(0, 100)
         self._download_dialog.setValue(0)
         self._download_dialog.setWindowModality(Qt.WindowModal)
-        self._download_dialog.setMinimumSize(480, 170)
-        self._download_dialog.setAutoClose(False)
-        self._download_dialog.setAutoReset(False)
+        self._download_dialog.setCancelButtonText("取消")
         self._download_dialog.setStyleSheet(f"""
-            QProgressDialog {{
+            QDialog#downloadProgressDialog {{
                 background-color: {Colors.BASE};
                 color: {Colors.TEXT};
             }}
@@ -2669,14 +2745,19 @@ class MainWindow(QMainWindow):
             }}
             QProgressBar {{
                 border: 2px solid {Colors.SURFACE0};
-                border-radius: 5px;
+                border-radius: 9px;
                 text-align: center;
                 background-color: {Colors.SURFACE0};
                 color: {Colors.TEXT};
+                min-height: 32px;
+                max-height: 32px;
+                padding: 0;
+                font-size: 13px;
+                font-weight: 700;
             }}
             QProgressBar::chunk {{
                 background-color: {Colors.BLUE};
-                border-radius: 3px;
+                border-radius: 7px;
             }}
         """)
         self._download_dialog.canceled.connect(self._on_download_canceled)
@@ -2711,12 +2792,14 @@ class MainWindow(QMainWindow):
         for label in dialog.findChildren(QLabel):
             label.setAlignment(Qt.AlignCenter)
             label.setWordWrap(True)
+            if dialog is getattr(self, '_download_dialog', None):
+                label.setMinimumWidth(540)
 
     def _on_download_finished(self, file_path, error):
         """下载完成回调"""
         # 关闭进度对话框
         if hasattr(self, '_download_dialog') and self._download_dialog:
-            self._download_dialog.close()
+            self._download_dialog.finish_and_close()
 
         if error:
             self._show_update_message(

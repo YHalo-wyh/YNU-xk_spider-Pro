@@ -1,7 +1,7 @@
 """用户运行数据路径与安全写入工具。
 
-程序文件可以被安装器覆盖；账号配置、待选课程和日志统一放在用户
-AppData 中，避免升级安装或更换程序目录时丢失。
+账号配置和待选课程保存在 AppData 中，避免覆盖安装时丢失；运行
+日志按用户要求写入程序安装目录（源码模式为项目根目录）。
 """
 import json
 import os
@@ -27,12 +27,19 @@ def _get_data_dir():
     return Path.home() / ".config" / APP_NAME
 
 
+def _get_log_dir():
+    """Return the executable-adjacent log directory requested by the user."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / "logs"
+    return Path(__file__).resolve().parent.parent / "logs"
+
+
 DATA_DIR = _get_data_dir()
 CONFIG_FILE = DATA_DIR / "config.json"
 MONITOR_STATE_FILE = DATA_DIR / "monitor_state.json"
 WATCHDOG_SIGNAL_FILE = DATA_DIR / "watchdog_signal.json"
 WATCHDOG_LOCK_FILE = DATA_DIR / "watchdog.lock"
-LOG_DIR = DATA_DIR / "logs"
+LOG_DIR = _get_log_dir()
 CRASH_LOG_FILE = LOG_DIR / "crash.log"
 
 
