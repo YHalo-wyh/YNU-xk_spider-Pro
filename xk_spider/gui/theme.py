@@ -80,9 +80,6 @@ def build_stylesheet(mode="light"):
     QMainWindow, QDialog, QWidget {{
         background-color: {c.BASE};
         color: {c.TEXT};
-        font-family: "HarmonyOS Sans SC", sans-serif;
-        font-size: 14px;
-        font-weight: 500;
     }}
     QWidget#loginPage, QWidget#workspacePage, QWidget#appRoot {{
         background-color: {c.BASE};
@@ -99,6 +96,54 @@ def build_stylesheet(mode="light"):
         background-color: {c.SURFACE1};
         border: 1px solid {c.BORDER};
         border-radius: 17px;
+    }}
+    QFrame#scheduleGrid {{
+        background-color: transparent;
+        border: 0;
+        border-radius: 17px;
+    }}
+    QFrame#scheduleCourseCard {{
+        background-color: transparent;
+        border: 0;
+    }}
+    QLabel#scheduleHeader {{
+        background-color: {c.SURFACE1};
+        border: 1px solid {c.BORDER};
+        border-radius: 10px;
+        color: {c.SUBTEXT1};
+        font-size: 12px;
+        font-weight: 750;
+    }}
+    QLabel#scheduleSection {{
+        background-color: {c.SURFACE1};
+        border: 1px solid {c.BORDER};
+        border-radius: 10px;
+        color: {c.SUBTEXT0};
+        font-size: 11px;
+        font-weight: 700;
+    }}
+    QFrame#scheduleCell {{
+        background-color: {c.SURFACE0};
+        border: 1px solid {c.BORDER};
+        border-radius: 12px;
+    }}
+    QFrame#selectedCourseCard {{
+        background-color: {c.SURFACE0};
+        border: 1px solid {c.BORDER};
+        border-radius: 16px;
+    }}
+    QFrame#selectedCourseCard:hover {{
+        background-color: {c.SURFACE1};
+        border-color: {c.BLUE};
+    }}
+    QLabel#creditBadge, QLabel#courseCreditBadge {{
+        color: {c.BLUE};
+        background-color: {c.MANTLE};
+        border: 1px solid {c.BORDER};
+        border-radius: 9px;
+        padding: 3px 8px;
+        font-size: 11px;
+        font-weight: 650;
     }}
     QLabel {{
         background-color: transparent;
@@ -297,6 +342,16 @@ def build_stylesheet(mode="light"):
     }}
     QToolButton:hover {{ background-color: {c.SURFACE1}; color: {c.TEXT}; }}
     QToolButton:pressed {{ background-color: {c.MANTLE}; }}
+    QToolButton#grabRemoveButton {{
+        background-color: transparent;
+        border: 1px solid transparent;
+        border-radius: 10px;
+        padding: 5px;
+    }}
+    QToolButton#grabRemoveButton:hover {{
+        background-color: {c.MANTLE};
+        border-color: {c.SURFACE2};
+    }}
     QListWidget {{
         background-color: {c.SURFACE0};
         border: 1px solid {c.BORDER};
@@ -310,6 +365,7 @@ def build_stylesheet(mode="light"):
         margin: 2px 0;
         color: {c.TEXT};
     }}
+    QListWidget#grabList::item {{ padding-right: 46px; }}
     QListWidget::item:hover {{ background-color: {c.SURFACE1}; }}
     QListWidget::item:selected {{ background-color: {c.MANTLE}; color: {c.BLUE}; }}
     QTextEdit {{
@@ -365,6 +421,33 @@ def build_stylesheet(mode="light"):
     QMenu::item {{ padding: 10px 32px 10px 14px; border-radius: 10px; }}
     QMenu::item:selected {{ background-color: {c.SURFACE1}; }}
     QStatusBar {{ background-color: {c.SURFACE0}; color: {c.SUBTEXT0}; border-top: 1px solid {c.BORDER}; }}
+    QToolTip {{
+        background-color: {c.SURFACE0};
+        color: {c.TEXT};
+        border: 1px solid {c.SURFACE2};
+        border-radius: 9px;
+        padding: 7px 10px;
+        font-size: 12px;
+        font-weight: 600;
+    }}
     QDialogButtonBox QPushButton {{ min-width: 86px; min-height: 22px; }}
     QMessageBox QLabel {{ color: {c.TEXT}; min-width: 280px; padding: 4px; }}
+    """
+
+
+def build_tooltip_stylesheet(mode="light"):
+    """Style top-level tooltip windows without reapplying the full app QSS."""
+    apply_palette(mode)
+    c = Colors
+    return f"""
+    QToolTip {{
+        background-color: {c.SURFACE0};
+        color: {c.TEXT};
+        border: 1px solid {c.SURFACE2};
+        border-radius: 9px;
+        padding: 7px 10px;
+        font-family: "HarmonyOS Sans SC", sans-serif;
+        font-size: 12px;
+        font-weight: 600;
+    }}
     """

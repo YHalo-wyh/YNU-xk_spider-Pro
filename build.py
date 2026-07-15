@@ -6,7 +6,7 @@ import sys
 import shutil
 import subprocess
 
-APP_VERSION = "v2.5.0"
+APP_VERSION = "v2.6.0"
 ARTIFACT_PREFIX = f"YNU.Pro_{APP_VERSION}"
 SETUP_FILENAME = f"{ARTIFACT_PREFIX}_Setup.exe"
 PORTABLE_FILENAME = f"{ARTIFACT_PREFIX}_Portable.zip"
@@ -287,9 +287,9 @@ RequestExecutionLevel user
 Section "Install"
     ; Clean old runtime files first to avoid mixed Python/dependency DLLs after upgrades.
     ; Keep user data such as xk_spider/config.json and logs intact.
-    Delete "$INSTDIR\YNU选课助手Pro.exe"
-    Delete "$INSTDIR\Watchdog.exe"
-    RMDir /r "$INSTDIR\_internal"
+    Delete "$INSTDIR\\YNU选课助手Pro.exe"
+    Delete "$INSTDIR\\Watchdog.exe"
+    RMDir /r "$INSTDIR\\_internal"
 
     SetOutPath "$INSTDIR"
     File /r "dist\\YNU选课助手Pro\\*.*"
@@ -315,7 +315,9 @@ SectionEnd
 """
     
     # 保存 NSIS 脚本 (使用 UTF-8 BOM 编码以支持中文)
-    with open("installer.nsi", "w", encoding="utf-8-sig") as f:
+    # Keep the generated script stable when build.py runs under Windows;
+    # otherwise universal-newline translation rewrites every tracked line.
+    with open("installer.nsi", "w", encoding="utf-8-sig", newline="\n") as f:
         f.write(nsis_script)
     
     # 检查是否安装了 NSIS

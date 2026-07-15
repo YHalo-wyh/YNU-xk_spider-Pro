@@ -336,24 +336,24 @@ class CourseFetchWorker(QThread):
                         self._extract_course_info(item, course_name, course_number))
         
         return courses_grouped
-    
+
     def _extract_course_info(self, tc, course_name, course_number):
         """提取教学班信息，正确解析状态字段"""
         # 状态字段可能是 "0"/"1" 字符串
         is_full = parse_bool_field(tc.get('isFull'))
         is_conflict = parse_bool_field(tc.get('isConflict'))
         is_chosen = parse_bool_field(tc.get('isChoose') or tc.get('isChosen'))
-        
+
         # 提取教师名和体育项目名
         teacher_name = tc.get('teacherName') or tc.get('SKJS', '')
         sport_name = tc.get('sportName', '')  # 体育课程特有字段
-        
+
         # 如果有体育项目名，拼接到教师名后面
         if sport_name:
             display_teacher = f"{teacher_name} -- {sport_name}"
         else:
             display_teacher = teacher_name
-        
+
         return {
             'JXBID': tc.get('teachingClassID') or tc.get('JXBID', ''),
             'KCM': course_name,
@@ -371,6 +371,290 @@ class CourseFetchWorker(QThread):
             'conflictDesc': tc.get('conflictDesc', ''),
         }
 
+
+class CurriculumFetchWorker(QThread):
+    """Fetch the official arranged and unarranged curriculum in background."""
+
+    result = pyqtSignal(list, list, str)
+
+    def __init__(self, token, cookies, student_code, batch_code):
+        super().__init__()
+        self.token = token
+        self.cookies = cookies
+        self.student_code = student_code
+        self.batch_code = batch_code
+
+    @staticmethod
+    def _parse_cookies(cookies_str):
+        parsed = {}
+        for item in str(cookies_str or '').split(';'):
+            if '=' not in item:
+                continue
+            key, value = item.strip().split('=', 1)
+            if key:
+                parsed[key] = value
+        return parsed
+
+    def run(self):
+        headers = {
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+            "X-Requested-With": "XMLHttpRequest",
+            "token": self.token,
+            "Origin": "https://xk.ynu.edu.cn",
+            "Referer": f"{BASE_URL}/*default/curriculum.do",
+            "User-Agent": "Mozilla/5.0 YNU-XK-Helper/2.6.0",
+        }
+        params = {
+            "studentCode": self.student_code,
+            "electiveBatchCode": self.batch_code,
+            "timestamp": int(time.time() * 1000),
+        }
+        try:
+            with requests.Session() as session:
+                session.cookies.update(self._parse_cookies(self.cookies))
+                arranged = self._request(
+                    session, f"{BASE_URL}/elective/teachingTime.do", headers, params
+                )
+                unarranged = self._request(
+                    session, f"{BASE_URL}/elective/noArranged.do", headers, params
+                )
+            self.result.emit(arranged, unarranged, '')
+        except requests.exceptions.Timeout:
+            self.result.emit([], [], "课表请求超时，请稍后重试")
+        except requests.exceptions.HTTPError as error:
+            status = error.response.status_code if error.response is not None else 0
+            if status in (401, 403):
+                message = "课表登录状态已更新，程序将自动重新同步"
+            else:
+                message = f"课表服务器请求失败（HTTP {status or '未知'}）"
+            self.result.emit([], [], message)
+        except requests.exceptions.RequestException as error:
+            self.result.emit([], [], f"课表网络请求失败：{type(error).__name__}")
+        except Exception as error:
+            self.result.emit([], [], f"课表加载失败：{str(error)[:80]}")
+
+    @staticmethod
+    def _request(session, url, headers, params):
+        response = session.get(
+            url,
+            headers=headers,
+            params=params,
+            timeout=(4, 12),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        code = str(payload.get('code', ''))
+        if code == '302':
+            raise RuntimeError("登录状态已过期，请重新登录后查看课表")
+        if code != '1':
+            raise RuntimeError(payload.get('msg') or "课表接口返回异常")
+        data = payload.get('dataList') or []
+        return data if isinstance(data, list) else []
+
+
+class SelectedCoursesWorker(QThread):
+    """Fetch the authoritative selected-course list from courseResult.do."""
+
+    result = pyqtSignal(list, str)
+
+    def __init__(self, token, cookies, student_code, batch_code):
+        super().__init__()
+        self.token = token
+        self.cookies = cookies
+        self.student_code = student_code
+        self.batch_code = batch_code
+
+    @staticmethod
+    def _cookies(value):
+        return CurriculumFetchWorker._parse_cookies(value)
+
+    def run(self):
+        try:
+            with requests.Session() as session:
+                response = session.get(
+                    f"{BASE_URL}/elective/courseResult.do",
+                    params={
+                        "timestamp": int(time.time() * 1000),
+                        "studentCode": self.student_code,
+                        "electiveBatchCode": self.batch_code,
+                    },
+                    headers={
+                        "Accept": "application/json, text/javascript, */*; q=0.01",
+                        "X-Requested-With": "XMLHttpRequest",
+                        "token": self.token,
+                        "Referer": f"{BASE_URL}/*default/grablessons.do?token={self.token}",
+                    },
+                    cookies=self._cookies(self.cookies),
+                    timeout=(4, 12),
+                    allow_redirects=False,
+                )
+            if response.status_code in (302, 401, 403):
+                self.result.emit([], "登录状态已过期，请重新登录后查看已选课程")
+                return
+            response.raise_for_status()
+            payload = response.json()
+            code = str(payload.get('code', ''))
+            if code in ('302', '-1'):
+                self.result.emit([], payload.get('msg') or "获取已选课程失败")
+                return
+            courses = payload.get('dataList') or payload.get('data') or []
+            if not isinstance(courses, list):
+                courses = []
+            courses = [item for item in courses if isinstance(item, dict)]
+            courses.sort(key=lambda item: str(item.get('courseName') or ''))
+            self.result.emit(courses, '')
+        except requests.exceptions.Timeout:
+            self.result.emit([], "获取已选课程超时，请稍后重试")
+        except requests.exceptions.HTTPError as error:
+            status = error.response.status_code if error.response is not None else 0
+            self.result.emit([], f"获取已选课程失败（HTTP {status or '未知'}）")
+        except Exception as error:
+            self.result.emit([], f"获取已选课程失败：{type(error).__name__}")
+
+
+class WithdrawCourseWorker(QThread):
+    """Withdraw one selected course and verify the authoritative result."""
+
+    status = pyqtSignal(str)
+    result = pyqtSignal(bool, str, dict)
+
+    def __init__(self, token, cookies, student_code, batch_code, course):
+        super().__init__()
+        self.token = token
+        self.cookies = cookies
+        self.student_code = student_code
+        self.batch_code = batch_code
+        self.course = dict(course or {})
+        self._logger = get_logger()
+
+    @staticmethod
+    def _course_id(course):
+        return str(
+            course.get('teachingClassID')
+            or course.get('JXBID')
+            or course.get('tcId')
+            or ''
+        )
+
+    def _headers(self):
+        return {
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "X-Requested-With": "XMLHttpRequest",
+            "token": self.token,
+            "Referer": f"{BASE_URL}/*default/grablessons.do?token={self.token}",
+        }
+
+    def run(self):
+        tc_id = self._course_id(self.course)
+        name = str(self.course.get('courseName') or self.course.get('KCM') or '未知课程')
+        if not tc_id:
+            self.result.emit(False, "课程缺少教学班编号，无法退选", self.course)
+            return
+
+        try:
+            self.status.emit(f"[退选] 准备提交：{name}（{tc_id}）")
+            self._logger.info(f"手动退选准备: name={name}, tc_id={tc_id}")
+            delete_param = {
+                "data": {
+                    "operationType": "2",
+                    "studentCode": self.student_code,
+                    "electiveBatchCode": self.batch_code,
+                    "teachingClassId": tc_id,
+                    "isMajor": "1",
+                }
+            }
+            with requests.Session() as session:
+                session.cookies.update(CurriculumFetchWorker._parse_cookies(self.cookies))
+                self.status.emit(f"[退选] 正在向服务器提交：{name}")
+                response = session.get(
+                    f"{BASE_URL}/elective/deleteVolunteer.do",
+                    params={
+                        "timestamp": int(time.time() * 1000),
+                        "deleteParam": json.dumps(delete_param, ensure_ascii=False),
+                    },
+                    headers=self._headers(),
+                    timeout=(4, 12),
+                    allow_redirects=False,
+                )
+                if response.status_code in (302, 401, 403):
+                    self._logger.warning(f"手动退选会话失效: tc_id={tc_id}")
+                    self.result.emit(False, "登录状态已过期，未能确认退选", self.course)
+                    return
+                response.raise_for_status()
+                payload = response.json()
+                code = str(payload.get('code', ''))
+                message = str(payload.get('msg') or '')
+                self._logger.info(
+                    f"手动退选响应: tc_id={tc_id}, code={code}, msg={message[:120]}"
+                )
+                self.status.emit(
+                    f"[退选] 服务器响应：code={code or '空'}，{message or '无说明'}"
+                )
+                if code != '1':
+                    self.result.emit(False, message or "服务器拒绝退选", self.course)
+                    return
+
+                self.status.emit(f"[退选] 服务器已受理，正在核实课表：{name}")
+                verify = session.get(
+                    f"{BASE_URL}/elective/courseResult.do",
+                    params={
+                        "timestamp": int(time.time() * 1000),
+                        "studentCode": self.student_code,
+                        "electiveBatchCode": self.batch_code,
+                    },
+                    headers=self._headers(),
+                    timeout=(4, 12),
+                    allow_redirects=False,
+                )
+                if verify.status_code != 200:
+                    self._logger.warning(
+                        f"手动退选核实异常: tc_id={tc_id}, HTTP={verify.status_code}"
+                    )
+                    self.result.emit(
+                        False,
+                        "服务器已受理退选，但核实接口异常，请刷新已选课程确认结果",
+                        self.course,
+                    )
+                    return
+                verify_payload = verify.json()
+                if str(verify_payload.get('code', '')) in ('302', '-1'):
+                    self.result.emit(
+                        False,
+                        "服务器已受理退选，但当前无法核实，请重新登录后确认",
+                        self.course,
+                    )
+                    return
+                remaining = verify_payload.get('dataList') or verify_payload.get('data') or []
+                remaining_ids = {
+                    self._course_id(item) for item in remaining if isinstance(item, dict)
+                }
+                if tc_id in remaining_ids:
+                    self._logger.warning(f"手动退选核实未通过: tc_id={tc_id} 仍在已选列表")
+                    self.result.emit(False, "核实失败：课程仍在已选列表中", self.course)
+                    return
+
+            self.status.emit(f"[退选] 核实完成：{name} 已不在已选列表")
+            self._logger.info(f"手动退选成功并核实: name={name}, tc_id={tc_id}")
+            self.result.emit(True, "退选成功并已完成核实", self.course)
+        except requests.exceptions.Timeout:
+            self._logger.warning(f"手动退选超时，结果不确定: tc_id={tc_id}")
+            self.result.emit(
+                False, "退选请求超时，结果暂时无法确定，请刷新已选课程核实", self.course
+            )
+        except requests.exceptions.HTTPError as error:
+            status = error.response.status_code if error.response is not None else 0
+            self._logger.warning(f"手动退选 HTTP 异常: tc_id={tc_id}, HTTP={status}")
+            self.result.emit(
+                False,
+                f"退选服务器请求失败（HTTP {status or '未知'}），请刷新后确认",
+                self.course,
+            )
+        except Exception as error:
+            self._logger.error(f"手动退选异常: tc_id={tc_id}, {type(error).__name__}: {error}")
+            self.result.emit(
+                False, f"退选异常：{type(error).__name__}，请刷新后确认", self.course
+            )
 
 class LoginWorker(QThread):
     """纯API登录线程"""

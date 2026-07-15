@@ -25,6 +25,13 @@ class AppProxyStyle(QProxyStyle):
     def styleHint(self, hint, option=None, widget=None, return_data=None):
         if hint == QStyle.SH_LineEdit_PasswordCharacter:
             return ord('\u2022')
+        if hint == QStyle.SH_ToolTip_WakeUpDelay:
+            return 2000
+        fall_asleep_hint = getattr(QStyle, 'SH_ToolTip_FallAsleepDelay', None)
+        if fall_asleep_hint is not None and hint == fall_asleep_hint:
+            # Require the full wake-up delay again after leaving a control,
+            # instead of making the next control's tip appear immediately.
+            return 0
         return super().styleHint(hint, option, widget, return_data)
 
 
@@ -168,14 +175,14 @@ def run_app():
         app = QApplication(sys.argv)
         app.setStyle(AppProxyStyle('Fusion'))
         loaded_fonts = load_application_fonts()
-        if loaded_fonts:
-            app_font = QFont('HarmonyOS Sans SC')
-            app_font.setPixelSize(14)
-            app_font.setWeight(QFont.Medium)
-            # Full hinting keeps glyph stems aligned to physical pixels at
-            # fractional Windows DPI scales (125%/150%).
-            app_font.setHintingPreference(QFont.PreferFullHinting)
-            app.setFont(app_font)
+        app_font = QFont(
+            'HarmonyOS Sans SC' if loaded_fonts else 'Microsoft YaHei UI'
+        )
+        app_font.setPixelSize(14)
+        app_font.setWeight(QFont.Medium)
+        # Keep glyph stems aligned to physical pixels at 125%/150% scaling.
+        app_font.setHintingPreference(QFont.PreferFullHinting)
+        app.setFont(app_font)
         
         # 设置应用级别图标（任务栏图标）
         icon_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'assets', 'icon.ico'))

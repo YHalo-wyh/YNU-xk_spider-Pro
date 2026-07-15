@@ -17,19 +17,25 @@ from PyQt5.QtWidgets import (
     QSpinBox, QAbstractSpinBox, QScrollArea, QCheckBox, QSplitter, QApplication, QMenu,
     QGraphicsOpacityEffect, QAction,
     QDialog, QDialogButtonBox, QProgressDialog, QStackedWidget, QToolButton,
-    QStyledItemDelegate, QStyleOptionViewItem, QStyle, QAbstractItemView
+    QStyledItemDelegate, QStyleOptionViewItem, QStyle, QAbstractItemView,
+    QAbstractButton
 )
 from PyQt5.QtCore import (
-    Qt, QTimer, pyqtSignal, QUrl, QSize, QPoint, QRect,
+    Qt, QTimer, pyqtSignal, QUrl, QSize, QPoint, QRect, QEvent,
+    QPersistentModelIndex,
     QPropertyAnimation, QParallelAnimationGroup, QVariantAnimation, QEasingCurve,
 )
 from PyQt5.QtGui import (
     QFont, QPainter, QColor, QBrush, QTextCursor, QDesktopServices, QIcon,
-    QTextCharFormat, QRadialGradient, QPainterPath, QRegion,
+    QTextCharFormat, QRadialGradient, QPainterPath, QRegion, QPen,
 )
 
 from .config import COURSE_TYPES, COURSE_NAME_TO_TYPE, parse_int, MONITOR_STATE_FILE, WATCHDOG_SIGNAL_FILE
-from .workers import LoginWorker, MultiGrabWorker, CourseFetchWorker, UpdateCheckWorker, DownloadUpdateWorker
+from .workers import (
+    LoginWorker, MultiGrabWorker, CourseFetchWorker, CurriculumFetchWorker,
+    SelectedCoursesWorker, WithdrawCourseWorker,
+    UpdateCheckWorker, DownloadUpdateWorker,
+)
 from .logger import get_logger
 from .utils import (
     default_webhook_config, make_legacy_feedback_channel,
@@ -39,8 +45,11 @@ from .utils import (
 from xk_spider.storage import (
     CONFIG_FILE, migrate_legacy_data, read_json, write_json_atomic,
 )
-from .icons import icon
-from .theme import Colors as ThemeColors, apply_palette, build_stylesheet
+from .icons import icon, VectorIconWidget
+from .theme import (
+    Colors as ThemeColors, apply_palette, build_stylesheet,
+    build_tooltip_stylesheet,
+)
 
 
 Colors = ThemeColors
@@ -105,6 +114,156 @@ class MotionButton(QPushButton):
     # entire button turns its text into a cached bitmap and looks soft at
     # fractional Windows scale factors.
     pass
+
+
+class AnimatedScheduleCard(QFrame):
+    """Rounded course card with a subtle colour/border hover transition."""
+
+    def __init__(self, accent, parent=None):
+        super().__init__(parent)
+        self.setObjectName("scheduleCourseCard")
+        # The global theme gives QWidget a solid base colour.  Keep the
+        # custom-painted margin transparent so its rounded shadow cannot
+        # reveal a square dark strip in the unarranged-course grid.
+        self.setAutoFillBackground(False)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self._accent = QColor(accent)
+        self._hover = 0.0
+        self._animation = QVariantAnimation(self)
+        self._animation.setDuration(180)
+        self._animation.setEasingCurve(QEasingCurve.OutCubic)
+        self._animation.valueChanged.connect(self._set_hover_progress)
+        self.setAttribute(Qt.WA_Hover, True)
+        self.setCursor(Qt.PointingHandCursor)
+
+    @staticmethod
+    def _mix(start, end, progress):
+        return QColor(
+            round(start.red() + (end.red() - start.red()) * progress),
+            round(start.green() + (end.green() - start.green()) * progress),
+            round(start.blue() + (end.blue() - start.blue()) * progress),
+            round(start.alpha() + (end.alpha() - start.alpha()) * progress),
+        )
+
+    def _animate_to(self, target):
+        self._animation.stop()
+        self._animation.setStartValue(self._hover)
+        self._animation.setEndValue(float(target))
+        self._animation.start()
+
+    def _set_hover_progress(self, value):
+        self._hover = float(value)
+        self.update()
+
+    def enterEvent(self, event):
+        self._animate_to(1.0)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._animate_to(0.0)
+        super().leaveEvent(event)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        shadow_rect = self.rect().adjusted(2, 3, -2, -1)
+        shadow_alpha = (28 if Colors.MODE == 'light' else 72) + round(self._hover * 18)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(0, 0, 0, shadow_alpha))
+        painter.drawRoundedRect(shadow_rect, 12, 12)
+
+        rect = self.rect().adjusted(1, 1, -1, -4)
+        background = self._mix(
+            QColor(Colors.SURFACE1), QColor(Colors.SURFACE2), self._hover
+        )
+        border = self._mix(
+            QColor(Colors.BORDER), self._accent, self._hover * 0.82
+        )
+        painter.setBrush(background)
+        painter.setPen(QPen(border, 1.0 + self._hover * 0.5))
+        painter.drawRoundedRect(rect, 12, 12)
+
+
+class GrabListWidget(QListWidget):
+    """v2.5 native item rendering plus a real remove button on the right."""
+
+    remove_requested = pyqtSignal(object)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("grabList")
+        self._remove_buttons = {}
+        self.verticalScrollBar().valueChanged.connect(self._queue_button_layout)
+        self.horizontalScrollBar().valueChanged.connect(self._queue_button_layout)
+        self.model().rowsRemoved.connect(self._queue_button_layout)
+        self.model().rowsInserted.connect(self._queue_button_layout)
+
+    def ensure_remove_button(self, item):
+        if item is None:
+            return
+        for button, persistent in self._remove_buttons.items():
+            if persistent.isValid() and self.item(persistent.row()) is item:
+                button.setIcon(icon("trash", Colors.SUBTEXT0, 16))
+                self._queue_button_layout()
+                return
+
+        persistent = QPersistentModelIndex(self.indexFromItem(item))
+        button = QToolButton(self.viewport())
+        button.setObjectName("grabRemoveButton")
+        button.setFixedSize(30, 30)
+        button.setIconSize(QSize(16, 16))
+        button.setIcon(icon("trash", Colors.SUBTEXT0, 16))
+        button.setCursor(Qt.PointingHandCursor)
+        button.setToolTip("从待抢列表移除")
+        button.clicked.connect(
+            lambda _checked=False, control=button: self._request_remove(control)
+        )
+        self._remove_buttons[button] = persistent
+        button.show()
+        self._queue_button_layout()
+
+    def _request_remove(self, button):
+        persistent = self._remove_buttons.get(button)
+        if persistent is None or not persistent.isValid():
+            return
+        item = self.item(persistent.row())
+        if item is not None:
+            self.remove_requested.emit(item)
+
+    def _queue_button_layout(self, *_args):
+        QTimer.singleShot(0, self._layout_remove_buttons)
+
+    def _layout_remove_buttons(self):
+        viewport_rect = self.viewport().rect()
+        stale = []
+        for button, persistent in self._remove_buttons.items():
+            if not persistent.isValid():
+                stale.append(button)
+                continue
+            item = self.item(persistent.row())
+            if item is None:
+                stale.append(button)
+                continue
+            rect = self.visualItemRect(item)
+            visible = rect.isValid() and viewport_rect.intersects(rect)
+            button.setVisible(visible)
+            if visible:
+                button.move(
+                    rect.right() - button.width() - 6,
+                    rect.top() + max(0, (rect.height() - button.height()) // 2),
+                )
+                button.raise_()
+        for button in stale:
+            self._remove_buttons.pop(button, None)
+            button.deleteLater()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._queue_button_layout()
+
+    def scrollContentsBy(self, dx, dy):
+        super().scrollContentsBy(dx, dy)
+        self._queue_button_layout()
 
 
 class FocusLineEdit(QLineEdit):
@@ -516,7 +675,9 @@ class CourseCard(QFrame):
 
         teacher = str(self.course_data.get('SKJS', '未知') or '未知')
         teacher_label = QLabel(teacher)
+        teacher_label.setWordWrap(True)
         teacher_label.setStyleSheet(f"font-size: 18px; font-weight: 700; color: {Colors.TEXT};")
+        self._teacher_label = teacher_label
         layout.addWidget(teacher_label)
 
         time_row = QHBoxLayout()
@@ -527,7 +688,9 @@ class CourseCard(QFrame):
         time_row.addWidget(time_icon, 0, Qt.AlignTop)
         time_label = QLabel(str(self.course_data.get('SKSJ', '') or '时间待定'))
         time_label.setWordWrap(True)
+        time_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         time_label.setStyleSheet(f"color: {Colors.SUBTEXT0}; font-size: 13px;")
+        self._time_label = time_label
         time_row.addWidget(time_label, 1)
         layout.addLayout(time_row)
 
@@ -577,6 +740,28 @@ class CourseCard(QFrame):
             self.grab_btn.clicked.connect(lambda: self.grab_clicked.emit(self.course_data))
         layout.addWidget(self.grab_btn)
         self.apply_theme()
+        QTimer.singleShot(0, self._sync_wrapped_label_heights)
+
+    def _sync_wrapped_label_heights(self):
+        """Keep long teacher/time text visible after responsive relayouts."""
+        for label in (
+            getattr(self, '_teacher_label', None),
+            getattr(self, '_time_label', None),
+        ):
+            if not label or label.width() <= 0:
+                continue
+            bounds = label.fontMetrics().boundingRect(
+                QRect(0, 0, max(1, label.contentsRect().width()), 1000),
+                Qt.TextWordWrap | Qt.AlignLeft | Qt.AlignVCenter,
+                label.text(),
+            )
+            target = max(label.fontMetrics().height() + 2, bounds.height() + 4)
+            if label.minimumHeight() != target:
+                label.setMinimumHeight(target)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._sync_wrapped_label_heights)
 
     def _make_badge(self, text, color):
         badge = QLabel(text)
@@ -611,9 +796,11 @@ class CourseCard(QFrame):
 
 class MainWindow(QMainWindow):
     """主窗口 - Modern Dark Dashboard"""
+
+    curriculum_updated = pyqtSignal(list, list, str)
     
     # 版本信息
-    VERSION = "v2.5.0"
+    VERSION = "v2.6.0"
     GITHUB_URL = "https://github.com/YHalo-wyh/YNU-xk_spider-Pro"
     
     def __init__(self):
@@ -669,6 +856,17 @@ class MainWindow(QMainWindow):
         
         # 课程获取 Worker
         self._course_fetch_worker = None
+        self._curriculum_worker = None
+        self._curriculum_dialog = None
+        self._curriculum_arranged = []
+        self._curriculum_unarranged = []
+        self._curriculum_loaded = False
+        self._curriculum_error = ''
+        self._curriculum_refresh_pending = False
+        self._curriculum_prefetch_waiting = False
+        self._selected_courses_worker = None
+        self._withdraw_course_worker = None
+        self._selected_courses_dialog = None
         self._fetch_silent = False
         self._responsive_timer = QTimer(self)
         self._responsive_timer.setSingleShot(True)
@@ -677,6 +875,10 @@ class MainWindow(QMainWindow):
         
         self.init_ui()
         self.init_menu()
+        app = QApplication.instance()
+        if app:
+            app.installEventFilter(self)
+        QTimer.singleShot(0, self._apply_crisp_fonts)
         self.load_config()
         self.adjust_for_screen()
         
@@ -721,7 +923,11 @@ class MainWindow(QMainWindow):
             self.setWindowIcon(QIcon(icon_path))
 
         self.setMinimumSize(900, 600)
-        self.setStyleSheet(build_stylesheet(self.theme_mode))
+        shared_stylesheet = build_stylesheet(self.theme_mode)
+        self.setStyleSheet(shared_stylesheet)
+        app = QApplication.instance()
+        if app:
+            app.setStyleSheet(build_tooltip_stylesheet(self.theme_mode))
         self.app_stack = QStackedWidget()
         self.app_stack.setObjectName("appRoot")
         self.setCentralWidget(self.app_stack)
@@ -877,6 +1083,16 @@ class MainWindow(QMainWindow):
         self.status_label.setObjectName("statusPill")
         header_layout.addWidget(self.status_label)
 
+        self.curriculum_btn = self._tool_button(
+            "calendar-days", "查看我的课表", self._show_curriculum
+        )
+        self.curriculum_btn.setEnabled(False)
+        header_layout.addWidget(self.curriculum_btn)
+        self.selected_courses_btn = self._tool_button(
+            "list-check", "查看已选课程", self._show_selected_courses
+        )
+        self.selected_courses_btn.setEnabled(False)
+        header_layout.addWidget(self.selected_courses_btn)
         self.workspace_theme_btn = self._tool_button("sun", "切换主题", self._toggle_theme)
         header_layout.addWidget(self.workspace_theme_btn)
         self.notification_btn = self._tool_button("bell", "通知设置", self._show_notification_settings)
@@ -973,17 +1189,17 @@ class MainWindow(QMainWindow):
         right_layout.setSpacing(9)
         right_layout.addLayout(self._section_header("target", "待抢与监控"))
 
-        self.grab_list = QListWidget()
+        self.grab_list = GrabListWidget()
         self.grab_list.setMinimumHeight(160)
         self.grab_list.setMaximumHeight(300)
-        self.grab_list.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.grab_list.customContextMenuRequested.connect(self.show_grab_context_menu)
+        self.grab_list.setContextMenuPolicy(Qt.NoContextMenu)
         self.grab_list.model().rowsInserted.connect(
             lambda *_args: QTimer.singleShot(0, self._update_grab_list_height)
         )
         self.grab_list.model().rowsRemoved.connect(
             lambda *_args: QTimer.singleShot(0, self._update_grab_list_height)
         )
+        self.grab_list.remove_requested.connect(self._remove_grab_item)
         right_layout.addWidget(self.grab_list)
         self.grab_count_label = QLabel("待抢 0 门")
         self.grab_count_label.setObjectName("mutedLabel")
@@ -1159,7 +1375,12 @@ class MainWindow(QMainWindow):
     def _toggle_theme(self):
         self.theme_mode = 'dark' if self.theme_mode == 'light' else 'light'
         apply_palette(self.theme_mode)
-        self.setStyleSheet(build_stylesheet(self.theme_mode))
+        shared_stylesheet = build_stylesheet(self.theme_mode)
+        self.setStyleSheet(shared_stylesheet)
+        app = QApplication.instance()
+        if app:
+            app.setStyleSheet(build_tooltip_stylesheet(self.theme_mode))
+        QTimer.singleShot(0, self._apply_crisp_fonts)
         self._refresh_icons()
         for field in (
             getattr(self, 'username_field', None),
@@ -1192,6 +1413,40 @@ class MainWindow(QMainWindow):
             overlay.setGeometry(self.app_stack.rect())
         if hasattr(self, '_responsive_timer'):
             self._responsive_timer.start()
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Show and isinstance(watched, QWidget):
+            self._polish_widget_font(watched)
+        if event.type() in (QEvent.Show, QEvent.Enter) and isinstance(
+            watched, QAbstractButton
+        ):
+            if not watched.toolTip():
+                text = str(watched.text() or '').replace('&', '').strip()
+                if not text and watched.objectName() == 'loginEyeButton':
+                    text = "显示或隐藏密码"
+                watched.setToolTip(text or "执行此操作")
+        return super().eventFilter(watched, event)
+
+    @staticmethod
+    def _polish_widget_font(widget):
+        """Restore the real font face and hinting after Qt applies QSS."""
+        app = QApplication.instance()
+        # Empty Qt item views evaluate to False, so use an identity check.
+        if app is None or widget is None:
+            return
+        base = app.font()
+        current = widget.font()
+        if isinstance(widget, QAbstractItemView):
+            current.setFamily(base.family())
+            current.setPixelSize(base.pixelSize())
+            current.setWeight(base.weight())
+        current.setHintingPreference(QFont.PreferFullHinting)
+        widget.setFont(current)
+
+    def _apply_crisp_fonts(self):
+        self._polish_widget_font(self)
+        for widget in self.findChildren(QWidget):
+            self._polish_widget_font(widget)
 
     def _apply_responsive_layout(self):
         if not hasattr(self, 'main_splitter'):
@@ -1232,7 +1487,7 @@ class MainWindow(QMainWindow):
         if not hasattr(self, 'grab_list'):
             return
         available_height = max(190, min(320, int(self.height() * 0.36)))
-        content_height = max(160, min(320, 16 + self.grab_list.count() * 48))
+        content_height = max(160, min(320, 16 + self.grab_list.count() * 54))
         target_height = min(available_height, content_height)
         self.grab_list.setMinimumHeight(target_height)
         self.grab_list.setMaximumHeight(available_height)
@@ -1291,6 +1546,695 @@ class MainWindow(QMainWindow):
             self.serverchan_checkbox.blockSignals(False)
             self.serverchan_key_input.setText(previous_key)
             self.serverchan_key_input.setVisible(previous_enabled)
+
+    def _prefetch_curriculum(self, force=False):
+        """Warm or refresh the curriculum cache without blocking the UI."""
+        if not self.is_logged_in or not all(
+            (self.token, self.cookies, self.student_code, self.batch_code)
+        ):
+            return False
+        if self._curriculum_worker and self._curriculum_worker.isRunning():
+            if force:
+                self._curriculum_refresh_pending = True
+            return False
+
+        self._curriculum_refresh_pending = False
+        token_snapshot = self.token
+        cookies_snapshot = self.cookies
+        worker = CurriculumFetchWorker(
+            token_snapshot, cookies_snapshot, self.student_code, self.batch_code
+        )
+        self._curriculum_worker = worker
+
+        def loaded(arranged, unarranged, error):
+            # Ignore a response belonging to a session that has since changed.
+            if (
+                not self.is_logged_in
+                or self.token != token_snapshot
+                or self.cookies != cookies_snapshot
+            ):
+                return
+            if not error:
+                self._curriculum_arranged = list(arranged)
+                self._curriculum_unarranged = list(unarranged)
+                self._curriculum_loaded = True
+                self._curriculum_error = ''
+            else:
+                self._curriculum_error = str(error)
+            self.curriculum_updated.emit(
+                list(self._curriculum_arranged),
+                list(self._curriculum_unarranged),
+                str(error or ''),
+            )
+
+        def thread_finished():
+            if self._curriculum_worker is worker:
+                self._curriculum_worker = None
+            if self._curriculum_refresh_pending and self.is_logged_in:
+                self._curriculum_refresh_pending = False
+                QTimer.singleShot(80, lambda: self._prefetch_curriculum(force=True))
+
+        worker.result.connect(loaded)
+        worker.finished.connect(thread_finished)
+        worker.start()
+        return True
+
+    def _start_pending_curriculum_prefetch(self):
+        """Warm the timetable only after the login page's first course request."""
+        if not self._curriculum_prefetch_waiting:
+            return
+        self._curriculum_prefetch_waiting = False
+        self._prefetch_curriculum(force=True)
+
+    @staticmethod
+    def _curriculum_unique_count(arranged, unarranged):
+        identities = set()
+        for course in list(arranged) + list(unarranged):
+            identity = (
+                course.get('teachingClassID')
+                or course.get('courseNumber')
+                or course.get('courseName')
+                or id(course)
+            )
+            identities.add(str(identity))
+        return len(identities)
+
+    def _show_curriculum(self):
+        """Open the themed curriculum view, using the login-time cache first."""
+        if not self.is_logged_in or not all(
+            (self.token, self.cookies, self.student_code, self.batch_code)
+        ):
+            self._show_centered_message(
+                QMessageBox.Information,
+                "查看课表",
+                "请先登录后再查看课表。",
+            )
+            return
+
+        dialog = self._prepare_dialog(QDialog(self))
+        dialog.setWindowTitle("我的课表")
+        dialog.setModal(True)
+        dialog.setStyleSheet(build_stylesheet(self.theme_mode))
+        screen = QApplication.primaryScreen().availableGeometry()
+        dialog.setMinimumSize(
+            min(900, screen.width() - 70), min(620, screen.height() - 70)
+        )
+        dialog.resize(min(1320, screen.width() - 70), min(820, screen.height() - 70))
+
+        root = QVBoxLayout(dialog)
+        root.setContentsMargins(20, 16, 20, 16)
+        root.setSpacing(10)
+
+        header = QHBoxLayout()
+        header.setSpacing(12)
+        mark = VectorIconWidget("calendar", Colors.BLUE, 36)
+        header.addWidget(mark, 0, Qt.AlignTop)
+        heading = QVBoxLayout()
+        heading.setSpacing(2)
+        title = QLabel("我的课表")
+        title.setObjectName("pageTitle")
+        heading.addWidget(title)
+        subtitle = QLabel(self.batch_name or "当前选课批次")
+        subtitle.setObjectName("mutedLabel")
+        subtitle.setWordWrap(True)
+        heading.addWidget(subtitle)
+        header.addLayout(heading, 1)
+        refresh_button = QPushButton("刷新")
+        refresh_button.setObjectName("secondaryButton")
+        refresh_button.setIcon(icon("refresh", Colors.SUBTEXT0, 16))
+        refresh_button.setFixedHeight(38)
+        header.addWidget(refresh_button, 0, Qt.AlignTop)
+        close_button = QPushButton("关闭")
+        close_button.setObjectName("secondaryButton")
+        close_button.setFixedHeight(38)
+        close_button.clicked.connect(dialog.accept)
+        header.addWidget(close_button, 0, Qt.AlignTop)
+        root.addLayout(header)
+
+        state_card = QFrame()
+        state_card.setObjectName("softCard")
+        state_layout = QVBoxLayout(state_card)
+        state_layout.setContentsMargins(22, 32, 22, 32)
+        state_layout.setSpacing(12)
+        state_icon = VectorIconWidget("calendar-days", Colors.BLUE, 42)
+        state_layout.addWidget(state_icon, 0, Qt.AlignHCenter)
+        state_text = QLabel("正在从选课系统同步课表…")
+        state_text.setAlignment(Qt.AlignCenter)
+        state_text.setObjectName("sectionTitle")
+        state_layout.addWidget(state_text)
+        root.addWidget(state_card, 1)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVisible(False)
+        root.addWidget(scroll, 1)
+
+        def render(arranged, unarranged, error=''):
+            has_cache = self._curriculum_loaded
+            if has_cache:
+                scroll.setWidget(self._build_curriculum_canvas(arranged, unarranged))
+                state_card.setVisible(False)
+                scroll.setVisible(True)
+                suffix = " · 刷新失败，正在显示已缓存课表" if error else ""
+                subtitle.setText(
+                    f"{self.batch_name or '当前选课批次'} · "
+                    f"共 {self._curriculum_unique_count(arranged, unarranged)} 门课程{suffix}"
+                )
+            elif error:
+                state_icon.set_icon("alert-triangle", Colors.RED)
+                state_text.setStyleSheet(f"color: {Colors.RED};")
+                state_text.setText(error)
+                state_card.setVisible(True)
+                scroll.setVisible(False)
+            refresh_button.setEnabled(True)
+
+        def refresh():
+            refresh_button.setEnabled(False)
+            if not self._curriculum_loaded:
+                state_icon.set_icon("refresh", Colors.BLUE)
+                state_text.setStyleSheet("")
+                state_text.setText("正在从选课系统同步课表…")
+                state_card.setVisible(True)
+                scroll.setVisible(False)
+            self._prefetch_curriculum(force=True)
+
+        refresh_button.clicked.connect(refresh)
+        self.curriculum_updated.connect(render)
+        self._curriculum_dialog = dialog
+        if self._curriculum_loaded:
+            render(self._curriculum_arranged, self._curriculum_unarranged)
+        else:
+            refresh_button.setEnabled(False)
+            self._prefetch_curriculum()
+        try:
+            dialog.exec_()
+        finally:
+            try:
+                self.curriculum_updated.disconnect(render)
+            except (TypeError, RuntimeError):
+                pass
+            self._curriculum_dialog = None
+
+    def _build_curriculum_canvas(self, arranged, unarranged):
+        canvas = QWidget()
+        canvas.setObjectName("curriculumCanvas")
+        canvas.setMinimumWidth(0)
+        canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        layout = QVBoxLayout(canvas)
+        layout.setContentsMargins(2, 2, 8, 8)
+        layout.setSpacing(16)
+
+        overview = QLabel(
+            f"已排时间课程 {len(arranged)} 条"
+            + (f" · 未安排时间 {len(unarranged)} 门" if unarranged else "")
+        )
+        overview.setObjectName("mutedLabel")
+        layout.addWidget(overview)
+
+        grid_frame = QFrame()
+        grid_frame.setObjectName("scheduleGrid")
+        grid_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        grid = QGridLayout(grid_frame)
+        grid.setContentsMargins(2, 2, 2, 2)
+        grid.setHorizontalSpacing(7)
+        grid.setVerticalSpacing(7)
+
+        headers = ["节次", "周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+        for column, text in enumerate(headers):
+            label = QLabel(text)
+            label.setObjectName("scheduleHeader")
+            label.setAlignment(Qt.AlignCenter)
+            label.setFixedHeight(40)
+            if column == 0:
+                label.setFixedWidth(68)
+            else:
+                label.setMinimumWidth(0)
+                label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                grid.setColumnStretch(column, 1)
+            grid.addWidget(label, 0, column)
+
+        grouped = {}
+        for course in arranged:
+            try:
+                day = min(7, max(1, int(course.get('dayOfWeek', 0))))
+                begin = min(12, max(1, int(course.get('beginSection', 1))))
+            except (TypeError, ValueError):
+                continue
+            row = min(5, (begin - 1) // 2)
+            grouped.setdefault((row, day), []).append(course)
+
+        section_names = ["1–2节", "3–4节", "5–6节", "7–8节", "9–10节", "11–12节"]
+        for row, section_name in enumerate(section_names, start=1):
+            section = QLabel(section_name)
+            section.setObjectName("scheduleSection")
+            section.setAlignment(Qt.AlignCenter)
+            section.setFixedHeight(134)
+            grid.addWidget(section, row, 0)
+            for day in range(1, 8):
+                cell = QFrame()
+                cell.setObjectName("scheduleCell")
+                cell.setFixedHeight(134)
+                cell.setMinimumWidth(0)
+                cell.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                cell_layout = QVBoxLayout(cell)
+                cell_layout.setContentsMargins(5, 5, 5, 5)
+                cell_layout.setSpacing(4)
+                courses = grouped.get((row - 1, day), [])
+                for index, course in enumerate(courses):
+                    cell_layout.addWidget(
+                        self._curriculum_course_card(course, index), 1
+                    )
+                if not courses:
+                    cell_layout.addStretch(1)
+                grid.addWidget(cell, row, day)
+        layout.addWidget(grid_frame)
+
+        if unarranged:
+            unarranged_title = self._section_header("calendar-days", "未安排时间课程")
+            layout.addLayout(unarranged_title)
+            unarranged_frame = QFrame()
+            unarranged_frame.setObjectName("softCard")
+            unarranged_grid = QGridLayout(unarranged_frame)
+            unarranged_grid.setContentsMargins(12, 12, 12, 12)
+            unarranged_grid.setSpacing(10)
+            for index, course in enumerate(unarranged):
+                unarranged_grid.setColumnStretch(index % 3, 1)
+                unarranged_grid.addWidget(
+                    self._curriculum_course_card(course, index), index // 3, index % 3
+                )
+            layout.addWidget(unarranged_frame)
+        layout.addStretch(1)
+        return canvas
+
+    def _curriculum_course_card(self, course, color_index=0):
+        accents = [Colors.BLUE, Colors.GREEN, Colors.MAUVE, Colors.YELLOW, Colors.RED]
+        accent = accents[color_index % len(accents)]
+        card = AnimatedScheduleCard(accent)
+        card.setMinimumWidth(0)
+        card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        card.setToolTip("\n".join(filter(None, (
+            str(course.get('courseName') or ''),
+            str(course.get('teacherName') or ''),
+            str(course.get('teachingPlace') or ''),
+            str(course.get('weekName') or ''),
+        ))))
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(9, 7, 9, 10)
+        card_layout.setSpacing(3)
+        name = str(course.get('courseName') or '未命名课程')
+        sport_name = str(course.get('sportName') or '').strip()
+        if sport_name:
+            name = f"{name} · {sport_name}"
+        name_label = QLabel(name)
+        name_label.setWordWrap(True)
+        name_label.setMinimumWidth(0)
+        name_label.setStyleSheet("font-size: 12px; font-weight: 750;")
+        card_layout.addWidget(name_label)
+        teacher = str(course.get('teacherName') or '').strip()
+        place = str(course.get('teachingPlace') or '').strip()
+        detail = " · ".join(value for value in (teacher, place) if value)
+        if detail:
+            detail_label = QLabel(detail)
+            detail_label.setWordWrap(True)
+            detail_label.setMinimumWidth(0)
+            detail_label.setStyleSheet(
+                f"color: {Colors.SUBTEXT0}; font-size: 10px; font-weight: 550;"
+            )
+            card_layout.addWidget(detail_label)
+        begin = str(course.get('beginSection') or '').strip()
+        end = str(course.get('endSection') or '').strip()
+        week = str(course.get('weekName') or '').strip()
+        timing = " · ".join(
+            value for value in ((f"{begin}–{end}节" if begin and end else ""), week) if value
+        )
+        if timing:
+            timing_label = QLabel(timing)
+            timing_label.setWordWrap(True)
+            timing_label.setMinimumWidth(0)
+            timing_label.setStyleSheet(f"color: {accent}; font-size: 10px; font-weight: 650;")
+            card_layout.addWidget(timing_label)
+        return card
+
+    @staticmethod
+    def _selected_course_id(course):
+        return str(
+            course.get('teachingClassID')
+            or course.get('JXBID')
+            or course.get('tcId')
+            or ''
+        )
+
+    def _selected_course_schedule(self, course):
+        tc_id = self._selected_course_id(course)
+        day_names = {'1': '周一', '2': '周二', '3': '周三', '4': '周四',
+                     '5': '周五', '6': '周六', '7': '周日'}
+        entries = []
+        for item in self._curriculum_arranged:
+            if self._selected_course_id(item) != tc_id:
+                continue
+            day = day_names.get(str(item.get('dayOfWeek') or ''), '')
+            begin = str(item.get('beginSection') or '')
+            end = str(item.get('endSection') or '')
+            week = str(item.get('weekName') or '')
+            place = str(item.get('teachingPlace') or '')
+            text = ' · '.join(filter(None, (
+                day,
+                f"{begin}–{end}节" if begin and end else '',
+                week,
+                place,
+            )))
+            if text and text not in entries:
+                entries.append(text)
+        return '；'.join(entries)
+
+    def _show_selected_courses(self):
+        if self._selected_courses_worker and self._selected_courses_worker.isRunning():
+            self._show_centered_message(
+                QMessageBox.Information, "已选课程", "已选课程正在加载，请稍候。"
+            )
+            return
+        if not self.is_logged_in or not all(
+            (self.token, self.cookies, self.student_code, self.batch_code)
+        ):
+            self._show_centered_message(
+                QMessageBox.Information, "已选课程", "请先登录后再查看已选课程。"
+            )
+            return
+
+        dialog = self._prepare_dialog(QDialog(self))
+        dialog.setWindowTitle("已选课程")
+        dialog.setModal(True)
+        dialog.setStyleSheet(build_stylesheet(self.theme_mode))
+        dialog.setMinimumSize(720, 520)
+        screen = QApplication.primaryScreen().availableGeometry()
+        dialog.resize(min(920, screen.width() - 70), min(720, screen.height() - 70))
+        root = QVBoxLayout(dialog)
+        root.setContentsMargins(22, 18, 22, 20)
+        root.setSpacing(12)
+
+        header = QHBoxLayout()
+        header.setSpacing(11)
+        marker = VectorIconWidget("list-check", Colors.BLUE, 36)
+        header.addWidget(marker, 0, Qt.AlignTop)
+        heading = QVBoxLayout()
+        heading.setSpacing(2)
+        title_row = QHBoxLayout()
+        title_row.setSpacing(10)
+        title = QLabel("已选课程")
+        title.setObjectName("pageTitle")
+        title_row.addWidget(title)
+        total_credit_label = QLabel("总学分 --")
+        total_credit_label.setObjectName("creditBadge")
+        total_credit_label.setToolTip("正在统计当前已选课程学分")
+        title_row.addWidget(total_credit_label)
+        title_row.addStretch(1)
+        heading.addLayout(title_row)
+        subtitle = QLabel("查看当前批次已选结果；手动退选不可自动回滚")
+        subtitle.setObjectName("mutedLabel")
+        heading.addWidget(subtitle)
+        header.addLayout(heading, 1)
+        refresh_button = QPushButton("刷新")
+        refresh_button.setObjectName("secondaryButton")
+        refresh_button.setIcon(icon("refresh", Colors.SUBTEXT0, 16))
+        refresh_button.setFixedHeight(38)
+        header.addWidget(refresh_button, 0, Qt.AlignTop)
+        close_button = QPushButton("关闭")
+        close_button.setObjectName("secondaryButton")
+        close_button.setFixedHeight(38)
+        close_button.clicked.connect(dialog.accept)
+        header.addWidget(close_button, 0, Qt.AlignTop)
+        root.addLayout(header)
+
+        state_card = QFrame()
+        state_card.setObjectName("softCard")
+        state_layout = QVBoxLayout(state_card)
+        state_layout.setContentsMargins(20, 34, 20, 34)
+        state_icon = VectorIconWidget("refresh", Colors.BLUE, 40)
+        state_layout.addWidget(state_icon, 0, Qt.AlignHCenter)
+        state_text = QLabel("正在获取已选课程…")
+        state_text.setObjectName("sectionTitle")
+        state_text.setAlignment(Qt.AlignCenter)
+        state_layout.addWidget(state_text)
+        root.addWidget(state_card, 1)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVisible(False)
+        root.addWidget(scroll, 1)
+
+        def load():
+            if self._selected_courses_worker and self._selected_courses_worker.isRunning():
+                return
+            refresh_button.setEnabled(False)
+            state_icon.set_icon("refresh", Colors.BLUE)
+            state_text.setStyleSheet("")
+            state_text.setText("正在获取已选课程…")
+            state_card.setVisible(True)
+            scroll.setVisible(False)
+            worker = SelectedCoursesWorker(
+                self.token, self.cookies, self.student_code, self.batch_code
+            )
+            self._selected_courses_worker = worker
+
+            def loaded(courses, error):
+                refresh_button.setEnabled(True)
+                if error:
+                    state_icon.set_icon("alert-triangle", Colors.RED)
+                    state_text.setStyleSheet(f"color: {Colors.RED};")
+                    state_text.setText(error)
+                    return
+                total_credit, missing_credit = self._selected_courses_credit_total(courses)
+                if missing_credit:
+                    total_credit_label.setText(
+                        f"已识别 {self._format_credit(total_credit)} 学分"
+                    )
+                    total_credit_label.setToolTip(
+                        f"有 {missing_credit} 门课程未返回学分，未计入当前合计"
+                    )
+                else:
+                    total_credit_label.setText(
+                        f"总学分 {self._format_credit(total_credit)}"
+                    )
+                    total_credit_label.setToolTip(
+                        f"当前 {len(courses)} 门已选课程的学分合计"
+                    )
+                subtitle.setText(f"当前共 {len(courses)} 门已选课程 · 手动退选不可自动回滚")
+                scroll.setWidget(self._build_selected_courses_canvas(courses, load))
+                state_card.setVisible(False)
+                scroll.setVisible(True)
+
+            def finished():
+                if self._selected_courses_worker is worker:
+                    self._selected_courses_worker = None
+
+            worker.result.connect(loaded)
+            worker.finished.connect(finished)
+            worker.start()
+
+        refresh_button.clicked.connect(load)
+        self._selected_courses_dialog = dialog
+        load()
+        dialog.exec_()
+        self._selected_courses_dialog = None
+
+    @staticmethod
+    def _selected_course_credit(course):
+        """Return a credit value without treating a missing field as zero."""
+        if not isinstance(course, dict):
+            return None
+        sources = [course]
+        for key in ('course', 'courseInfo', 'teachingClass', 'teachingClassInfo'):
+            nested = course.get(key)
+            if isinstance(nested, dict):
+                sources.append(nested)
+        keys = {
+            'coursecredit', 'coursecredits', 'credit', 'credits',
+            'xf', 'kcxf', 'xuefen', 'courseunit',
+        }
+        for source in sources:
+            # The same endpoint has used differently-cased field names across
+            # deployments, so match keys case-insensitively without guessing
+            # from unrelated numeric fields such as scores or class hours.
+            for key, value in source.items():
+                if str(key).replace('_', '').lower() not in keys:
+                    continue
+                if value is None or isinstance(value, bool):
+                    continue
+                match = re.search(r'\d+(?:\.\d+)?', str(value).strip())
+                if not match:
+                    continue
+                number = float(match.group())
+                if 0 <= number <= 30:
+                    return number
+        return None
+
+    @staticmethod
+    def _format_credit(value):
+        number = float(value or 0)
+        return str(int(number)) if number.is_integer() else f"{number:.2f}".rstrip('0')
+
+    def _selected_courses_credit_total(self, courses):
+        credits = [self._selected_course_credit(course) for course in courses]
+        known = [value for value in credits if value is not None]
+        return sum(known), len(credits) - len(known)
+
+    def _build_selected_courses_canvas(self, courses, reload_callback):
+        canvas = QWidget()
+        layout = QVBoxLayout(canvas)
+        layout.setContentsMargins(2, 2, 8, 8)
+        layout.setSpacing(10)
+        if not courses:
+            empty = QLabel("当前批次没有已选课程")
+            empty.setObjectName("mutedLabel")
+            empty.setAlignment(Qt.AlignCenter)
+            empty.setMinimumHeight(180)
+            layout.addWidget(empty)
+            return canvas
+
+        for course in courses:
+            card = QFrame()
+            card.setObjectName("selectedCourseCard")
+            card.setAttribute(Qt.WA_Hover, True)
+            row = QHBoxLayout(card)
+            row.setContentsMargins(16, 13, 12, 13)
+            row.setSpacing(14)
+            info = QVBoxLayout()
+            info.setSpacing(4)
+            name = str(course.get('courseName') or course.get('KCM') or '未知课程')
+            name_row = QHBoxLayout()
+            name_row.setSpacing(9)
+            name_label = QLabel(name)
+            name_label.setWordWrap(True)
+            name_label.setStyleSheet("font-size: 15px; font-weight: 750;")
+            name_row.addWidget(name_label)
+            credit = self._selected_course_credit(course)
+            credit_badge = QLabel(
+                f"学分 {self._format_credit(credit)}" if credit is not None else "学分 --"
+            )
+            credit_badge.setObjectName("courseCreditBadge")
+            credit_badge.setToolTip(
+                "该课程学分" if credit is not None else "服务器未返回该课程的学分字段"
+            )
+            name_row.addWidget(credit_badge, 0, Qt.AlignVCenter)
+            name_row.addStretch(1)
+            info.addLayout(name_row)
+            teacher = str(course.get('teacherName') or course.get('SKJS') or '').strip()
+            course_type = str(
+                course.get('courseTypeName') or course.get('courseNatureName') or ''
+            ).strip()
+            number = str(course.get('courseNumber') or '').strip()
+            meta = ' · '.join(filter(None, (teacher, course_type, number)))
+            if meta:
+                meta_label = QLabel(meta)
+                meta_label.setWordWrap(True)
+                meta_label.setStyleSheet(
+                    f"color: {Colors.SUBTEXT0}; font-size: 12px; font-weight: 550;"
+                )
+                info.addWidget(meta_label)
+            schedule = self._selected_course_schedule(course)
+            if schedule:
+                schedule_label = QLabel(schedule)
+                schedule_label.setWordWrap(True)
+                schedule_label.setStyleSheet(
+                    f"color: {Colors.SUBTEXT1}; font-size: 12px; font-weight: 550;"
+                )
+                info.addWidget(schedule_label)
+            row.addLayout(info, 1)
+            withdraw = QPushButton("退选")
+            withdraw.setObjectName("dangerButton")
+            withdraw.setIcon(icon("trash", "#FFFFFF", 15))
+            withdraw.setFixedSize(92, 38)
+            withdraw.setCursor(Qt.PointingHandCursor)
+            withdraw.setToolTip("退选此课程（操作不可自动回滚）")
+            withdraw.clicked.connect(
+                lambda _checked=False, selected=course, button=withdraw:
+                self._withdraw_selected_course(selected, button, reload_callback)
+            )
+            row.addWidget(withdraw, 0, Qt.AlignVCenter)
+            layout.addWidget(card)
+        layout.addStretch(1)
+        return canvas
+
+    def _withdraw_selected_course(self, course, button, reload_callback):
+        if self.multi_grab_worker and self.multi_grab_worker.isRunning():
+            self._show_centered_message(
+                QMessageBox.Warning,
+                "监控运行中",
+                "为避免与换课或回滚请求发生竞态，请先停止监控，再手动退选。",
+            )
+            return
+        if self._withdraw_course_worker and self._withdraw_course_worker.isRunning():
+            self._show_centered_message(
+                QMessageBox.Information, "正在退选", "已有一项退选操作正在核实，请稍候。"
+            )
+            return
+
+        name = str(course.get('courseName') or course.get('KCM') or '未知课程')
+        reply = self._show_centered_message(
+            QMessageBox.Warning,
+            "确认退选",
+            f"确定退选“{name}”吗？\n\n"
+            "这是主动退选操作，成功后不会自动回滚，也不能保证课程仍有名额可重新选回。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+            yes_text="确认退选",
+            no_text="取消",
+        )
+        if reply != QMessageBox.Yes:
+            self.log(f"[退选] 用户取消：{name}")
+            return
+
+        button.setEnabled(False)
+        button.setText("核实中…")
+        self.log(f"[退选] 用户确认退选：{name}")
+        worker = WithdrawCourseWorker(
+            self.token, self.cookies, self.student_code, self.batch_code, course
+        )
+        self._withdraw_course_worker = worker
+        worker.status.connect(self.log)
+
+        def completed(success, message, selected):
+            button.setEnabled(True)
+            button.setText("退选")
+            tc_id = self._selected_course_id(selected)
+            if success:
+                self.log(f"[SUCCESS] 退选成功并完成核实：{name}（{tc_id}）")
+                self._curriculum_arranged = [
+                    item for item in self._curriculum_arranged
+                    if self._selected_course_id(item) != tc_id
+                ]
+                self._curriculum_unarranged = [
+                    item for item in self._curriculum_unarranged
+                    if self._selected_course_id(item) != tc_id
+                ]
+                self.curriculum_updated.emit(
+                    self._curriculum_arranged, self._curriculum_unarranged, ''
+                )
+                self._show_centered_message(
+                    QMessageBox.Information,
+                    "退选成功",
+                    f"{name}\n\n已从服务器已选列表中核实移除。",
+                    icon_name_override="circle-check",
+                    icon_color_override=Colors.GREEN,
+                )
+                QTimer.singleShot(100, lambda: self._prefetch_curriculum(force=True))
+                QTimer.singleShot(350, lambda: self.refresh_courses(silent=True, force=True))
+            else:
+                self.log(f"[ERROR] 退选未确认成功：{name}；{message}")
+                self._show_centered_message(
+                    QMessageBox.Warning, "退选结果", f"{name}\n\n{message}"
+                )
+            if self._selected_courses_dialog and self._selected_courses_dialog.isVisible():
+                QTimer.singleShot(120, reload_callback)
+
+        def finished():
+            if self._withdraw_course_worker is worker:
+                self._withdraw_course_worker = None
+
+        worker.result.connect(completed)
+        worker.finished.connect(finished)
+        worker.start()
 
     def _save_notification_settings(self):
         self.serverchan_enabled = self.serverchan_checkbox.isChecked()
@@ -1607,11 +2551,14 @@ class MainWindow(QMainWindow):
         default_button=QMessageBox.NoButton,
         yes_text=None,
         no_text=None,
+        icon_name_override=None,
+        icon_color_override=None,
     ):
         """Native-looking card dialog with genuinely centred icon and copy."""
         dialog = self._prepare_dialog(QDialog(self))
         dialog.setWindowTitle(title)
         dialog.setModal(True)
+        dialog.setStyleSheet(build_stylesheet(self.theme_mode))
         dialog.setMinimumWidth(540)
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(34, 28, 34, 26)
@@ -1623,6 +2570,10 @@ class MainWindow(QMainWindow):
             QMessageBox.Question: ('help', Colors.BLUE),
             QMessageBox.Information: ('info', Colors.BLUE),
         }.get(message_icon, ('info', Colors.BLUE))
+        if icon_name_override:
+            icon_name = icon_name_override
+        if icon_color_override:
+            icon_color = icon_color_override
         icon_label = QLabel()
         icon_label.setPixmap(icon(icon_name, icon_color, 38).pixmap(38, 38))
         icon_label.setAlignment(Qt.AlignCenter)
@@ -2325,6 +3276,8 @@ class MainWindow(QMainWindow):
         self.login_btn.setText("已登录")
         self.login_btn.setEnabled(False)
         self.logout_btn.setEnabled(True)
+        self.curriculum_btn.setEnabled(True)
+        self.selected_courses_btn.setEnabled(True)
         self.progress_bar.setVisible(False)
         if hasattr(self, 'login_progress'):
             self.login_progress.setVisible(False)
@@ -2332,6 +3285,11 @@ class MainWindow(QMainWindow):
             self.login_feedback_label.clear()
             self.login_feedback_label.setStyleSheet("")
         self._fade_in_workspace()
+        # Do not compete with the first course-list request. Its completion
+        # starts this prefetch; the timer covers watchdog restore paths where
+        # no initial browser request is made.
+        self._curriculum_prefetch_waiting = True
+        QTimer.singleShot(2500, self._start_pending_curriculum_prefetch)
 
         self.log("[SUCCESS] 登录成功")
         self.log(f"[INFO] 校区: {campus_name} ({campus})")
@@ -2444,6 +3402,12 @@ class MainWindow(QMainWindow):
         self.student_code = ''
         self.campus = '02'  # 重置为默认
         self.cookies = ''
+        self._curriculum_arranged = []
+        self._curriculum_unarranged = []
+        self._curriculum_loaded = False
+        self._curriculum_error = ''
+        self._curriculum_refresh_pending = False
+        self._curriculum_prefetch_waiting = False
         self.batch_label.setText("选课批次：自动识别")
         
         self.status_label.setText("未登录")
@@ -2451,6 +3415,8 @@ class MainWindow(QMainWindow):
         self.login_btn.setText("登录")
         self.login_btn.setEnabled(True)
         self.logout_btn.setEnabled(False)
+        self.curriculum_btn.setEnabled(False)
+        self.selected_courses_btn.setEnabled(False)
         
         self.course_list.clear()
         self.clear_cards()
@@ -2528,6 +3494,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, '_current_fetch_type') and self._current_fetch_type != current_type:
             # 旧请求的回调，忽略
             return
+        QTimer.singleShot(80, self._start_pending_curriculum_prefetch)
         
         if error:
             error_str = str(error).lower()
@@ -2834,6 +3801,7 @@ class MainWindow(QMainWindow):
             item.setIcon(icon('target', Colors.BLUE, 17))
         item.setForeground(QBrush(color))
         item.setBackground(QBrush(background))
+        self.grab_list.ensure_remove_button(item)
 
     def _refresh_grab_item_visuals(self):
         if not hasattr(self, 'grab_list'):
@@ -2874,31 +3842,27 @@ class MainWindow(QMainWindow):
             and self.multi_grab_worker.isRunning()
         )
     
-    def show_grab_context_menu(self, pos):
-        item = self.grab_list.itemAt(pos)
-        if not item:
+    def _remove_grab_item(self, item):
+        if not item or self.grab_list.row(item) < 0:
             return
-        
-        menu = QMenu(self)
-        remove_action = menu.addAction(icon("trash", Colors.SUBTEXT0, 16), "移除")
-        action = menu.exec_(self.grab_list.mapToGlobal(pos))
-        
-        if action == remove_action:
-            course = item.data(Qt.UserRole)
-            tc_id = course.get('JXBID', '') if course else ''
-            
-            row = self.grab_list.row(item)
-            self.grab_list.takeItem(row)
-            self.grab_count_label.setText(f"待抢: {self.grab_list.count()} 门")
-            
-            if self.multi_grab_worker and self.multi_grab_worker.isRunning() and tc_id:
-                self.multi_grab_worker.remove_course(tc_id)
-            
-            self.log(f"[INFO] 移除待抢: {course.get('KCM', '')}")
-            self.save_monitor_state(
-                is_monitoring=self.multi_grab_worker is not None
-                and self.multi_grab_worker.isRunning()
-            )
+        course = item.data(Qt.UserRole) or {}
+        tc_id = course.get('JXBID', '')
+        row = self.grab_list.row(item)
+        self.grab_list.takeItem(row)
+        self.grab_count_label.setText(f"待抢: {self.grab_list.count()} 门")
+
+        if self.multi_grab_worker and self.multi_grab_worker.isRunning() and tc_id:
+            self.multi_grab_worker.remove_course(tc_id)
+
+        self.log(f"[INFO] 移除待抢: {course.get('KCM', '')}")
+        self.save_monitor_state(
+            is_monitoring=self.multi_grab_worker is not None
+            and self.multi_grab_worker.isRunning()
+        )
+
+    def show_grab_context_menu(self, _pos):
+        """Retained for compatibility; removal is now an inline row action."""
+        return
 
     def _course_time_text(self, course):
         return (
@@ -3376,8 +4340,12 @@ class MainWindow(QMainWindow):
                 is_monitoring=self.multi_grab_worker is not None
                 and self.multi_grab_worker.isRunning()
             )
-            self._show_standard_message(
-                self, QMessageBox.Information, "抢课成功", msg
+            self._show_centered_message(
+                QMessageBox.Information,
+                "抢课成功",
+                msg,
+                icon_name_override="circle-check",
+                icon_color_override=Colors.GREEN,
             )
         except Exception as e:
             try:
@@ -3430,6 +4398,7 @@ class MainWindow(QMainWindow):
             self.token = token
             self.cookies = cookies
             self.log("[INFO] Session 已同步更新")
+            QTimer.singleShot(120, lambda: self._prefetch_curriculum(force=True))
         except Exception:
             pass
     

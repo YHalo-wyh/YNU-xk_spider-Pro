@@ -6,9 +6,10 @@ single 1x pixmap when a window is moved to a high-DPI monitor.
 """
 from functools import lru_cache
 
-from PyQt5.QtCore import QByteArray, Qt
+from PyQt5.QtCore import QByteArray, Qt, QSize, QRectF
 from PyQt5.QtGui import QIcon, QPainter, QPixmap
 from PyQt5.QtSvg import QSvgRenderer
+from PyQt5.QtWidgets import QWidget
 
 
 _PATHS = {
@@ -21,6 +22,9 @@ _PATHS = {
     "search": '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>',
     "book": '<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z"/>',
     "calendar": '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 11h18"/>',
+    "calendar-days": '<rect x="3" y="4.5" width="18" height="17" rx="3"/><path d="M8 2.5v4M16 2.5v4M3 9.5h18"/><path d="M7 13h2M11 13h2M15 13h2M7 17h2M11 17h2M15 17h2"/>',
+    "circle-check": '<circle cx="12" cy="12" r="9"/><path d="m8 12 2.6 2.6L16.5 9"/>',
+    "list-check": '<path d="m4 6 1.5 1.5L8.5 4.5M11 6h9M4 12l1.5 1.5 3-3M11 12h9M4 18l1.5 1.5 3-3M11 18h9"/>',
     "target": '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/>',
     "star": '<path d="m12 2.5 2.9 5.9 6.5.9-4.7 4.6 1.1 6.5-5.8-3.1-5.8 3.1 1.1-6.5-4.7-4.6 6.5-.9Z"/>',
     "alert-triangle": '<path d="M10.3 3.6 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.6a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4M12 17h.01"/>',
@@ -40,15 +44,39 @@ _PATHS = {
 }
 
 
-@lru_cache(maxsize=256)
-def icon(name, color="#667085", size=20):
+def _svg_bytes(name, color):
     body = _PATHS.get(name, _PATHS["info"]).replace("__COLOR__", color)
     svg = (
         '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" '
         'viewBox="0 0 24 24" fill="none" stroke="%s" stroke-width="1.8" '
         'stroke-linecap="round" stroke-linejoin="round">%s</svg>' % (color, body)
     )
-    renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+    return QByteArray(svg.encode("utf-8"))
+
+
+class VectorIconWidget(QWidget):
+    """Paint an SVG directly onto the widget's device for crisp HiDPI output."""
+
+    def __init__(self, name, color="#667085", size=20, parent=None):
+        super().__init__(parent)
+        self._renderer = QSvgRenderer(_svg_bytes(name, color), self)
+        self.setFixedSize(QSize(size, size))
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+
+    def set_icon(self, name, color="#667085"):
+        self._renderer.load(_svg_bytes(name, color))
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        # Python 3.13's PyQt5 build requires the documented QRectF overload.
+        self._renderer.render(painter, QRectF(self.rect()))
+
+
+@lru_cache(maxsize=256)
+def icon(name, color="#667085", size=20):
+    renderer = QSvgRenderer(_svg_bytes(name, color))
     result = QIcon()
     for device_ratio in (1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0):
         physical_size = max(1, round(size * device_ratio))
