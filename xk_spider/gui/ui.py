@@ -43,7 +43,8 @@ from .utils import (
     validate_webhook_channels,
 )
 from xk_spider.storage import (
-    CONFIG_FILE, migrate_legacy_data, read_json, write_json_atomic,
+    CONFIG_FILE, WATCHDOG_LOCK_FILE,
+    migrate_legacy_data, read_json, write_json_atomic,
 )
 from .icons import icon, VectorIconWidget
 from .theme import (
