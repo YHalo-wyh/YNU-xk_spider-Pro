@@ -21,7 +21,7 @@ from PyQt5.QtWidgets import (
     QAbstractButton
 )
 from PyQt5.QtCore import (
-    Qt, QTimer, pyqtSignal, QUrl, QSize, QPoint, QRect, QEvent,
+    Qt, QTimer, pyqtSignal, QUrl, QSize, QPoint, QRect, QRectF, QEvent,
     QPersistentModelIndex,
     QPropertyAnimation, QParallelAnimationGroup, QVariantAnimation, QEasingCurve,
 )
@@ -261,6 +261,33 @@ class AnimatedScheduleCard(QFrame):
         painter.setBrush(background)
         painter.setPen(QPen(border, 1.0 + self._hover * 0.5))
         painter.drawRoundedRect(rect, 12, 12)
+
+
+class RoundedStatusLabel(QLabel):
+    """Status pill painted directly to avoid the native square item frame."""
+
+    def __init__(self, text='', parent=None):
+        super().__init__(text, parent)
+        # The stylesheet background would still fill the widget's rectangular
+        # bounds behind the custom rounded painting.  Keep that backing fully
+        # transparent and reserve the pill padding through widget margins.
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setContentsMargins(12, 6, 12, 6)
+        self.setMinimumHeight(30)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setRenderHint(QPainter.TextAntialiasing, True)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        radius = max(1.0, min(16.0, rect.height() / 2.0))
+        painter.setPen(QPen(QColor(Colors.BORDER), 1.0))
+        painter.setBrush(QColor(Colors.SURFACE1))
+        painter.drawRoundedRect(rect, radius, radius)
+        text_color = Colors.GREEN if self.property("monitoring") else Colors.OVERLAY0
+        painter.setPen(QColor(text_color))
+        painter.setFont(self.font())
+        painter.drawText(self.rect(), Qt.AlignCenter, self.text())
 
 
 class GrabListWidget(QListWidget):
@@ -528,10 +555,13 @@ class SpaciousComboBox(QComboBox):
         height = rect.height() if visible_height is None else max(
             1, min(rect.height(), int(visible_height))
         )
-        path.addRoundedRect(
-            float(rect.x()), float(rect.y()),
-            float(rect.width()), float(height), 15.0, 15.0
+        mask_rect = QRectF(
+            rect.x() + 0.5,
+            rect.y() + 0.5,
+            max(1.0, rect.width() - 1.0),
+            max(1.0, height - 1.0),
         )
+        path.addRoundedRect(mask_rect, 15.0, 15.0)
         popup.setMask(QRegion(path.toFillPolygon().toPolygon()))
 
     def showPopup(self):
@@ -539,8 +569,13 @@ class SpaciousComboBox(QComboBox):
         popup_width = self.width()
         popup_height = min(max(self.count(), 1) * 44 + 24, 360)
         popup = view.window()
-        popup.setWindowFlags(Qt.Popup | Qt.FramelessWindowHint)
-        popup.setStyleSheet(f"background-color: {Colors.SURFACE0}; border: none;")
+        popup_flags = Qt.Popup | Qt.FramelessWindowHint
+        if hasattr(Qt, 'NoDropShadowWindowHint'):
+            popup_flags |= Qt.NoDropShadowWindowHint
+        popup.setWindowFlags(popup_flags)
+        popup.setAttribute(Qt.WA_TranslucentBackground, True)
+        popup.setAutoFillBackground(False)
+        popup.setStyleSheet("background-color: transparent; border: none;")
         view.setObjectName("spaciousComboPopup")
         view.setFrameShape(QFrame.NoFrame)
         view.setAttribute(Qt.WA_StyledBackground, True)
@@ -730,6 +765,8 @@ class CourseCard(QFrame):
         self.setMinimumWidth(290)
         self.setMaximumWidth(520)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self._badges = []
+        self._metric_labels = []
 
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
@@ -741,14 +778,14 @@ class CourseCard(QFrame):
         status_row = QHBoxLayout()
         status_row.setSpacing(7)
         if is_chosen:
-            status_row.addWidget(self._make_badge("已选", Colors.GREEN))
+            status_row.addWidget(self._make_badge("已选", "GREEN"))
         else:
             if is_full:
-                status_row.addWidget(self._make_badge("已满", Colors.RED))
+                status_row.addWidget(self._make_badge("已满", "RED"))
             if is_conflict:
-                status_row.addWidget(self._make_badge("时间冲突", Colors.YELLOW))
+                status_row.addWidget(self._make_badge("时间冲突", "YELLOW"))
             if not is_full:
-                status_row.addWidget(self._make_badge("可选", Colors.GREEN))
+                status_row.addWidget(self._make_badge("可选", "GREEN"))
         status_row.addStretch()
         layout.addLayout(status_row)
 
@@ -764,6 +801,7 @@ class CourseCard(QFrame):
         time_icon = QLabel()
         time_icon.setPixmap(icon("calendar", Colors.SUBTEXT0, 17).pixmap(17, 17))
         time_icon.setFixedSize(18, 18)
+        self._time_icon = time_icon
         time_row.addWidget(time_icon, 0, Qt.AlignTop)
         time_label = QLabel(str(self.course_data.get('SKSJ', '') or '时间待定'))
         time_label.setWordWrap(True)
@@ -781,13 +819,13 @@ class CourseCard(QFrame):
         metrics_layout = QHBoxLayout(metrics)
         metrics_layout.setContentsMargins(12, 9, 12, 9)
         metrics_layout.setSpacing(10)
-        for name, value, color in (
-            ("已选", selected, Colors.SUBTEXT1),
-            ("容量", capacity, Colors.SUBTEXT1),
-            ("余量", remain, Colors.GREEN if remain > 0 else Colors.RED),
+        for name, value, color_role in (
+            ("已选", selected, "SUBTEXT1"),
+            ("容量", capacity, "SUBTEXT1"),
+            ("余量", remain, "GREEN" if remain > 0 else "RED"),
         ):
             metric = QLabel(f"{name}  {value}")
-            metric.setStyleSheet(f"color: {color}; font-size: 12px; font-weight: 600;")
+            self._metric_labels.append((metric, color_role))
             metrics_layout.addWidget(metric)
         metrics_layout.addStretch()
         layout.addWidget(metrics)
@@ -842,12 +880,9 @@ class CourseCard(QFrame):
         super().resizeEvent(event)
         QTimer.singleShot(0, self._sync_wrapped_label_heights)
 
-    def _make_badge(self, text, color):
+    def _make_badge(self, text, color_role):
         badge = QLabel(text)
-        badge.setStyleSheet(
-            f"color: {color}; background-color: {Colors.SURFACE1}; border: 1px solid {Colors.BORDER}; "
-            "border-radius: 10px; padding: 3px 9px; font-size: 11px; font-weight: 650;"
-        )
+        self._badges.append((badge, color_role))
         return badge
 
     def apply_theme(self):
@@ -865,6 +900,27 @@ class CourseCard(QFrame):
             }}
             QFrame#courseCard:hover {{ border-color: {Colors.BLUE}; }}
         """)
+        self._teacher_label.setStyleSheet(
+            f"font-size: 18px; font-weight: 700; color: {Colors.TEXT};"
+        )
+        self._time_label.setStyleSheet(
+            f"color: {Colors.SUBTEXT0}; font-size: 13px;"
+        )
+        self._time_icon.setPixmap(
+            icon("calendar", Colors.SUBTEXT0, 17).pixmap(17, 17)
+        )
+        for badge, color_role in self._badges:
+            badge.setStyleSheet(
+                f"color: {getattr(Colors, color_role)}; "
+                f"background-color: {Colors.SURFACE1}; "
+                f"border: 1px solid {Colors.BORDER}; border-radius: 10px; "
+                "padding: 3px 9px; font-size: 11px; font-weight: 650;"
+            )
+        for metric, color_role in self._metric_labels:
+            metric.setStyleSheet(
+                f"color: {getattr(Colors, color_role)}; "
+                "font-size: 12px; font-weight: 600;"
+            )
 
     def enterEvent(self, event):
         super().enterEvent(event)
@@ -881,6 +937,7 @@ class MainWindow(QMainWindow):
     # 版本信息
     VERSION = "v2.6.0"
     GITHUB_URL = "https://github.com/YHalo-wyh/YNU-xk_spider-Pro"
+    RELEASES_URL = f"{GITHUB_URL}/releases"
     
     def __init__(self):
         super().__init__()
@@ -1023,8 +1080,12 @@ class MainWindow(QMainWindow):
         self.progress_bar.setFixedWidth(180)
         self.progress_bar.setVisible(False)
         self.statusBar().addPermanentWidget(self.progress_bar)
-        self.run_indicator = QLabel("待机")
+        # QStatusBar creates a native square resize grip in the lower-right
+        # corner by default; the main window frame already provides resizing.
+        self.statusBar().setSizeGripEnabled(False)
+        self.run_indicator = RoundedStatusLabel("待机")
         self.run_indicator.setObjectName("runPill")
+        self.run_indicator.setProperty("monitoring", False)
         self.statusBar().addPermanentWidget(self.run_indicator)
         self.statusBar().setVisible(False)
 
@@ -1106,6 +1167,7 @@ class MainWindow(QMainWindow):
 
         self.login_btn = MotionButton("登录")
         self.login_btn.setObjectName("primaryButton")
+        self.login_btn.setProperty("disableAutoToolTip", True)
         self.login_btn.setFixedHeight(52)
         self.login_btn.setCursor(Qt.PointingHandCursor)
         self.login_btn.clicked.connect(self.on_manual_login_clicked)
@@ -1421,7 +1483,9 @@ class MainWindow(QMainWindow):
         overlay.setGraphicsEffect(effect)
         effect.setOpacity(1.0)
         animation = QPropertyAnimation(effect, b"opacity", self)
-        animation.setDuration(320)
+        # Keep the transition visible but short enough that a successful login
+        # feels immediate, especially on lower-refresh-rate displays.
+        animation.setDuration(220)
         animation.setStartValue(1.0)
         animation.setEndValue(0.0)
         animation.setEasingCurve(QEasingCurve.OutCubic)
@@ -1453,13 +1517,8 @@ class MainWindow(QMainWindow):
 
     def _toggle_theme(self):
         self.theme_mode = 'dark' if self.theme_mode == 'light' else 'light'
-        apply_palette(self.theme_mode)
         shared_stylesheet = build_stylesheet(self.theme_mode)
         self.setStyleSheet(shared_stylesheet)
-        app = QApplication.instance()
-        if app:
-            app.setStyleSheet(build_tooltip_stylesheet(self.theme_mode))
-        QTimer.singleShot(0, self._apply_crisp_fonts)
         self._refresh_icons()
         for field in (
             getattr(self, 'username_field', None),
@@ -1467,12 +1526,10 @@ class MainWindow(QMainWindow):
         ):
             if field:
                 field.apply_theme()
-        selected_item = self.course_list.currentItem() if hasattr(self, 'course_list') else None
-        if selected_item and selected_item.data(Qt.UserRole) in self._api_courses_grouped:
-            self.on_course_selected(selected_item)
-        else:
-            for card in self.findChildren(CourseCard):
-                card.apply_theme()
+        # Theme changes only alter presentation.  Updating cards in place avoids
+        # deleting and rebuilding the selected course list on every click.
+        for card in self.findChildren(CourseCard):
+            card.apply_theme()
         if self.is_logged_in:
             self.status_label.setStyleSheet(
                 f"color: {Colors.GREEN}; background-color: {Colors.SURFACE1}; "
@@ -1482,6 +1539,9 @@ class MainWindow(QMainWindow):
         elif hasattr(self, 'status_label'):
             self.status_label.setStyleSheet("")
         self._refresh_grab_item_visuals()
+        self._set_run_indicator_state(
+            bool(self.run_indicator.property("monitoring"))
+        )
         self.save_config()
         self.update()
 
@@ -1496,15 +1556,35 @@ class MainWindow(QMainWindow):
     def eventFilter(self, watched, event):
         if event.type() == QEvent.Show and isinstance(watched, QWidget):
             self._polish_widget_font(watched)
+        if event.type() in (QEvent.Show, QEvent.Resize) and isinstance(
+            watched, QWidget
+        ) and watched.windowType() == Qt.ToolTip:
+            if event.type() == QEvent.Show:
+                # Keep tooltip colours current without calling
+                # QApplication.setStyleSheet(), which would repolish every
+                # widget in the application during each theme switch.
+                watched.setStyleSheet(build_tooltip_stylesheet(self.theme_mode))
+            self._apply_rounded_tooltip_mask(watched)
         if event.type() in (QEvent.Show, QEvent.Enter) and isinstance(
             watched, QAbstractButton
         ):
-            if not watched.toolTip():
+            if watched.property("disableAutoToolTip"):
+                watched.setToolTip("")
+            elif not watched.toolTip():
                 text = str(watched.text() or '').replace('&', '').strip()
                 if not text and watched.objectName() == 'loginEyeButton':
                     text = "显示或隐藏密码"
                 watched.setToolTip(text or "执行此操作")
         return super().eventFilter(watched, event)
+
+    @staticmethod
+    def _apply_rounded_tooltip_mask(widget):
+        """Clip Qt's native tooltip window so no square backing shows through."""
+        if widget.width() <= 0 or widget.height() <= 0:
+            return
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(widget.rect()), 10.0, 10.0)
+        widget.setMask(QRegion(path.toFillPolygon().toPolygon()))
 
     @staticmethod
     def _polish_widget_font(widget):
@@ -1754,13 +1834,17 @@ class MainWindow(QMainWindow):
         state_card.setObjectName("softCard")
         state_layout = QVBoxLayout(state_card)
         state_layout.setContentsMargins(22, 32, 22, 32)
-        state_layout.setSpacing(12)
+        state_layout.setSpacing(10)
+        state_layout.addStretch(1)
         state_icon = VectorIconWidget("calendar-days", Colors.BLUE, 42)
         state_layout.addWidget(state_icon, 0, Qt.AlignHCenter)
         state_text = QLabel("正在从选课系统同步课表…")
         state_text.setAlignment(Qt.AlignCenter)
         state_text.setObjectName("sectionTitle")
+        state_text.setWordWrap(True)
+        state_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         state_layout.addWidget(state_text)
+        state_layout.addStretch(1)
         root.addWidget(state_card, 1)
 
         scroll = QScrollArea()
@@ -2049,12 +2133,17 @@ class MainWindow(QMainWindow):
         state_card.setObjectName("softCard")
         state_layout = QVBoxLayout(state_card)
         state_layout.setContentsMargins(20, 34, 20, 34)
+        state_layout.setSpacing(10)
+        state_layout.addStretch(1)
         state_icon = VectorIconWidget("refresh", Colors.BLUE, 40)
         state_layout.addWidget(state_icon, 0, Qt.AlignHCenter)
         state_text = QLabel("正在获取已选课程…")
         state_text.setObjectName("sectionTitle")
         state_text.setAlignment(Qt.AlignCenter)
+        state_text.setWordWrap(True)
+        state_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         state_layout.addWidget(state_text)
+        state_layout.addStretch(1)
         root.addWidget(state_card, 1)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -2565,15 +2654,11 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("", 0)
 
         if error:
-            self._show_update_message(
-                QMessageBox.Warning, "检查更新", f"检查更新失败\n\n{error}"
-            )
+            self._handle_update_check_error(error)
             return
 
         if not latest_version:
-            self._show_update_message(
-                QMessageBox.Information, "检查更新", "暂无发布版本信息"
-            )
+            self._handle_update_check_error("暂无发布版本信息")
             return
 
         current_text = self._format_version(self.VERSION)
@@ -2608,6 +2693,80 @@ class MainWindow(QMainWindow):
             self._show_update_message(
                 QMessageBox.Information, "检查更新", f"当前已是最新版本 {current_text}"
             )
+
+    def _handle_update_check_error(self, error):
+        """Offer a retry and a reliable manual fallback when GitHub API fails."""
+        action = self._show_update_check_error_dialog(error)
+        if action == "retry":
+            QTimer.singleShot(0, self._check_update)
+        elif action == "releases":
+            QDesktopServices.openUrl(QUrl(self.RELEASES_URL))
+
+    def _show_update_check_error_dialog(self, error):
+        dialog = self._prepare_dialog(QDialog(self))
+        dialog.setWindowTitle("检查更新失败")
+        dialog.setModal(True)
+        dialog.setStyleSheet(build_stylesheet(self.theme_mode))
+        dialog.setMinimumWidth(570)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(34, 28, 34, 26)
+        layout.setSpacing(15)
+
+        icon_label = QLabel()
+        icon_label.setPixmap(icon("alert-triangle", Colors.YELLOW, 38).pixmap(38, 38))
+        icon_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(icon_label)
+
+        title_label = QLabel("未能获取最新版本信息")
+        title_label.setObjectName("sectionTitle")
+        title_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title_label)
+
+        detail_label = QLabel(str(error or "未知错误"))
+        detail_label.setAlignment(Qt.AlignCenter)
+        detail_label.setTextFormat(Qt.PlainText)
+        detail_label.setWordWrap(True)
+        detail_label.setMaximumWidth(500)
+        detail_label.setStyleSheet(f"color: {Colors.SUBTEXT0}; font-size: 13px;")
+        layout.addWidget(detail_label)
+
+        release_label = QLabel(
+            f'项目 Releases：<a href="{self.RELEASES_URL}">{self.RELEASES_URL}</a>'
+        )
+        release_label.setAlignment(Qt.AlignCenter)
+        release_label.setTextFormat(Qt.RichText)
+        release_label.setOpenExternalLinks(True)
+        release_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        release_label.setStyleSheet(f"color: {Colors.SUBTEXT1}; font-size: 12px;")
+        layout.addWidget(release_label)
+
+        result = {"action": "close"}
+        button_row = QHBoxLayout()
+        button_row.setSpacing(9)
+        button_row.addStretch(1)
+
+        retry_button = QPushButton("重试")
+        retry_button.setObjectName("primaryButton")
+        releases_button = QPushButton("打开 Releases")
+        releases_button.setObjectName("secondaryButton")
+        close_button = QPushButton("关闭")
+        close_button.setObjectName("secondaryButton")
+        for button in (retry_button, releases_button, close_button):
+            button.setMinimumHeight(40)
+            button_row.addWidget(button)
+        button_row.addStretch(1)
+        layout.addLayout(button_row)
+
+        def finish(action):
+            result["action"] = action
+            dialog.accept()
+
+        retry_button.clicked.connect(lambda: finish("retry"))
+        releases_button.clicked.connect(lambda: finish("releases"))
+        close_button.clicked.connect(lambda: finish("close"))
+        dialog.exec_()
+        return result["action"]
 
     def _show_update_message(
         self,
@@ -3250,6 +3409,13 @@ class MainWindow(QMainWindow):
         try:
             main_pid = os.getpid()
 
+            # A previous app instance can leave a live watchdog aimed at its
+            # old PID.  Retire that instance before spawning the watchdog for
+            # the current window; dead/reused PID locks are simply discarded.
+            if self._retire_previous_watchdog(main_pid):
+                self._logger.info(f"Watchdog 已在守护当前主程序: pid={main_pid}")
+                return
+
             if getattr(sys, 'frozen', False):
                 base_dir = os.path.dirname(sys.executable)
                 watchdog_exe = os.path.join(base_dir, 'Watchdog.exe')
@@ -3257,7 +3423,7 @@ class MainWindow(QMainWindow):
                     self._logger.warning(f"Watchdog.exe 不存在: {watchdog_exe}")
                     return
 
-                subprocess.Popen(
+                watchdog_process = subprocess.Popen(
                     [watchdog_exe, str(main_pid)],
                     creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW,
                     start_new_session=True,
@@ -3270,14 +3436,78 @@ class MainWindow(QMainWindow):
                     self._logger.warning(f"run_watchdog.py 不存在: {watchdog_script}")
                     return
 
-                subprocess.Popen(
+                watchdog_process = subprocess.Popen(
                     [sys.executable, watchdog_script, str(main_pid)],
                     creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0,
                     start_new_session=True,
                     cwd=base_dir
                 )
+            self._logger.info(
+                f"Watchdog 已启动: pid={watchdog_process.pid}, target={main_pid}"
+            )
         except Exception as e:
             self._logger.error(f"启动 watchdog 失败: {e}")
+
+    def _retire_previous_watchdog(self, main_pid):
+        """Remove stale locks and stop a watchdog that targets another app."""
+        try:
+            lock_path = str(WATCHDOG_LOCK_FILE)
+            if not os.path.isfile(lock_path):
+                return False
+            with open(lock_path, 'r', encoding='utf-8') as file:
+                watchdog_pid = int(file.read().strip())
+        except (OSError, TypeError, ValueError):
+            try:
+                os.remove(str(WATCHDOG_LOCK_FILE))
+            except OSError:
+                pass
+            return False
+
+        if watchdog_pid <= 0 or watchdog_pid == main_pid:
+            return False
+
+        try:
+            import psutil
+        except ImportError:
+            psutil = None
+
+        remove_lock = True
+        already_guarded = False
+        try:
+            if psutil is None:
+                return False
+            process = psutil.Process(watchdog_pid)
+            name = process.name().lower()
+            command_parts = process.cmdline()
+            command = ' '.join(command_parts).lower()
+            is_watchdog = 'watchdog' in name or 'run_watchdog.py' in command
+            targets_current = str(main_pid) in command_parts[1:]
+            if is_watchdog and targets_current:
+                remove_lock = False
+                already_guarded = True
+            elif is_watchdog:
+                self._logger.info(
+                    f"替换旧 Watchdog: pid={watchdog_pid}, 当前主程序={main_pid}"
+                )
+                process.terminate()
+                try:
+                    process.wait(timeout=2.0)
+                except psutil.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=1.0)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+        except Exception as error:
+            self._logger.warning(
+                f"检查旧 Watchdog 失败，继续创建新守护: {type(error).__name__}"
+            )
+        finally:
+            if remove_lock:
+                try:
+                    os.remove(str(WATCHDOG_LOCK_FILE))
+                except OSError:
+                    pass
+        return already_guarded
 
     def _auto_login_for_restore(self):
         """闪退恢复时自动登录"""
@@ -4335,17 +4565,7 @@ class MainWindow(QMainWindow):
         self.start_grab_btn.setEnabled(False)
         self.stop_grab_btn.setEnabled(True)
         self.run_indicator.setText("监控中 · 已扫描 0 次")
-        self.run_indicator.setStyleSheet(f"""
-            QLabel {{
-                color: {Colors.GREEN};
-                background-color: {Colors.SURFACE0};
-                font-size: 13px;
-                font-weight: bold;
-                padding: 6px 16px;
-                border-radius: 16px;
-                margin: 2px 8px;
-            }}
-        """)
+        self._set_run_indicator_state(True)
         self.statusBar().showMessage("监控中...")
     
     def stop_monitoring(self, clear_state=True, reason='manual'):
@@ -4363,17 +4583,7 @@ class MainWindow(QMainWindow):
         self.start_grab_btn.setEnabled(True)
         self.stop_grab_btn.setEnabled(False)
         self.run_indicator.setText("待机")
-        self.run_indicator.setStyleSheet(f"""
-            QLabel {{
-                color: {Colors.OVERLAY0};
-                background-color: {Colors.SURFACE0};
-                font-size: 13px;
-                font-weight: bold;
-                padding: 6px 16px;
-                border-radius: 16px;
-                margin: 2px 8px;
-            }}
-        """)
+        self._set_run_indicator_state(False)
         if reason == 'logout':
             if was_monitoring:
                 self.statusBar().showMessage("已退出登录（监控已停止）")
@@ -4435,6 +4645,13 @@ class MainWindow(QMainWindow):
                 self._logger.error(f"on_grab_success 异常: {str(e)[:50]}")
             except Exception:
                 pass
+
+    def _set_run_indicator_state(self, monitoring):
+        """Keep the scan-status card bound to the active theme palette."""
+        if not hasattr(self, 'run_indicator'):
+            return
+        self.run_indicator.setProperty("monitoring", bool(monitoring))
+        self.run_indicator.update()
 
     def on_courses_retired(self, tc_ids, reason):
         """worker 自动停止冲突待抢课程后，同步刷新 UI 列表。"""

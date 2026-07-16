@@ -16,6 +16,7 @@ from PyQt5.QtGui import QFont, QFontDatabase
 
 from .ui import MainWindow
 from .config import MONITOR_STATE_FILE
+from .utils import warmup_captcha_ocr
 from xk_spider.storage import LOG_DIR, read_json
 
 
@@ -26,7 +27,7 @@ class AppProxyStyle(QProxyStyle):
         if hint == QStyle.SH_LineEdit_PasswordCharacter:
             return ord('\u2022')
         if hint == QStyle.SH_ToolTip_WakeUpDelay:
-            return 2000
+            return 1000
         fall_asleep_hint = getattr(QStyle, 'SH_ToolTip_FallAsleepDelay', None)
         if fall_asleep_hint is not None and hint == fall_asleep_hint:
             # Require the full wake-up delay again after leaving a control,
@@ -191,6 +192,10 @@ def run_app():
         
         window = MainWindow()
         window.show()
+        # The packaged OCR model is isolated from Qt for DLL safety.  Warm it
+        # after the window is visible so the first login does not pay the
+        # helper's cold-start cost.
+        warmup_captcha_ocr()
         
         app.exec_()
 

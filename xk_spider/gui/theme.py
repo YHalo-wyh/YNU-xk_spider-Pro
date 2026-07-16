@@ -179,12 +179,19 @@ def build_stylesheet(mode="light"):
         font-size: 13px;
         font-weight: 600;
     }}
-    QLabel#statusPill, QLabel#batchPill, QLabel#runPill {{
+    QLabel#statusPill, QLabel#batchPill {{
         background-color: {c.SURFACE1};
         border: 1px solid {c.BORDER};
         border-radius: 16px;
         color: {c.SUBTEXT1};
         padding: 6px 12px;
+        font-size: 12px;
+        font-weight: 650;
+    }}
+    QLabel#runPill {{
+        background-color: transparent;
+        border: none;
+        padding: 0;
         font-size: 12px;
         font-weight: 650;
     }}
@@ -418,14 +425,19 @@ def build_stylesheet(mode="light"):
         border-radius: 14px;
         padding: 6px;
     }}
-    QMenu::item {{ padding: 10px 32px 10px 14px; border-radius: 10px; }}
+    QMenu::item {{ padding: 10px 32px 10px 20px; border-radius: 10px; }}
+    QMenu::icon {{ margin-left: 6px; }}
     QMenu::item:selected {{ background-color: {c.SURFACE1}; }}
     QStatusBar {{ background-color: {c.SURFACE0}; color: {c.SUBTEXT0}; border-top: 1px solid {c.BORDER}; }}
+    QStatusBar::item {{
+        background-color: transparent;
+        border: none;
+    }}
     QToolTip {{
         background-color: {c.SURFACE0};
         color: {c.TEXT};
         border: 1px solid {c.SURFACE2};
-        border-radius: 9px;
+        border-radius: 10px;
         padding: 7px 10px;
         font-size: 12px;
         font-weight: 600;
@@ -444,7 +456,7 @@ def build_tooltip_stylesheet(mode="light"):
         background-color: {c.SURFACE0};
         color: {c.TEXT};
         border: 1px solid {c.SURFACE2};
-        border-radius: 9px;
+        border-radius: 10px;
         padding: 7px 10px;
         font-family: "HarmonyOS Sans SC", sans-serif;
         font-size: 12px;

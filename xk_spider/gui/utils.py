@@ -3,6 +3,9 @@
 环境检查、SSL修复、OCR检测、Server酱通知推送
 """
 import os
+import atexit
+import queue
+import struct
 import subprocess
 import sys
 import threading
@@ -43,6 +46,8 @@ fix_pil_antialias()
 OCR_AVAILABLE = False
 _ocr_instance = None
 _ocr_import_error = ''
+_ocr_helper_process = None
+_ocr_helper_lock = threading.RLock()
 
 try:
     import ddddocr
@@ -69,15 +74,7 @@ def captcha_ocr_available(ocr_instance=None):
     return ocr_instance is not None or os.path.isfile(_ocr_helper_path())
 
 
-def classify_captcha(image_bytes, ocr_instance=None, timeout=12):
-    """Recognise one captcha while keeping Qt and ONNX in separate processes."""
-    if ocr_instance is not None:
-        return ocr_instance.classification(image_bytes)
-
-    helper = _ocr_helper_path()
-    if not os.path.isfile(helper):
-        return ''
-
+def _ocr_helper_environment():
     environment = os.environ.copy()
     for key in list(environment):
         if key.startswith('_PYI_'):
@@ -90,21 +87,128 @@ def classify_captcha(image_bytes, ocr_instance=None, timeout=12):
         if entry and entry not in path_entries:
             path_entries.append(entry)
     environment['PATH'] = os.pathsep.join(path_entries)
+    return environment
 
-    completed = subprocess.run(
-        [helper],
-        input=bytes(image_bytes),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=timeout,
-        check=False,
-        cwd=os.path.dirname(helper),
-        env=environment,
-        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
-    )
-    if completed.returncode != 0:
+
+def _readline_with_timeout(stream, timeout):
+    result_queue = queue.Queue(maxsize=1)
+
+    def _reader():
+        try:
+            result_queue.put(stream.readline())
+        except Exception:
+            result_queue.put(b'')
+
+    threading.Thread(target=_reader, daemon=True).start()
+    try:
+        return result_queue.get(timeout=timeout)
+    except queue.Empty:
+        return b''
+
+
+def _stop_ocr_helper_locked():
+    global _ocr_helper_process
+    process = _ocr_helper_process
+    _ocr_helper_process = None
+    if process is None:
+        return
+    try:
+        if process.stdin:
+            process.stdin.close()
+    except Exception:
+        pass
+    try:
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=1.5)
+    except Exception:
+        try:
+            process.kill()
+        except Exception:
+            pass
+
+
+def _ensure_ocr_helper_locked(timeout=12):
+    global _ocr_helper_process
+    if _ocr_helper_process is not None and _ocr_helper_process.poll() is None:
+        return _ocr_helper_process
+
+    helper = _ocr_helper_path()
+    if not os.path.isfile(helper):
+        return None
+    _stop_ocr_helper_locked()
+    try:
+        process = subprocess.Popen(
+            [helper, '--server'],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            bufsize=0,
+            cwd=os.path.dirname(helper),
+            env=_ocr_helper_environment(),
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+        )
+        ready = _readline_with_timeout(process.stdout, timeout)
+        if ready.strip() != b'READY' or process.poll() is not None:
+            try:
+                process.terminate()
+            except Exception:
+                pass
+            return None
+        _ocr_helper_process = process
+        return process
+    except Exception:
+        _ocr_helper_process = None
+        return None
+
+
+def warmup_captcha_ocr():
+    """Warm the isolated OCR model without delaying the login window."""
+    if not _ocr_helper_path():
+        return
+
+    def _warm():
+        with _ocr_helper_lock:
+            _ensure_ocr_helper_locked()
+
+    threading.Thread(target=_warm, daemon=True, name='ocr-warmup').start()
+
+
+def classify_captcha(image_bytes, ocr_instance=None, timeout=12):
+    """Recognise one captcha while keeping Qt and ONNX in separate processes."""
+    if ocr_instance is not None:
+        return ocr_instance.classification(image_bytes)
+
+    helper = _ocr_helper_path()
+    if not os.path.isfile(helper):
         return ''
-    return completed.stdout.decode('ascii', errors='ignore').strip()
+
+    with _ocr_helper_lock:
+        for _attempt in range(2):
+            process = _ensure_ocr_helper_locked(timeout=timeout)
+            if process is None or process.stdin is None or process.stdout is None:
+                continue
+            try:
+                payload = bytes(image_bytes)
+                process.stdin.write(struct.pack('!I', len(payload)))
+                process.stdin.write(payload)
+                process.stdin.flush()
+                result = _readline_with_timeout(process.stdout, timeout)
+                if result and process.poll() is None:
+                    captcha = result.decode('ascii', errors='ignore').strip()
+                    return captcha
+            except Exception:
+                pass
+            _stop_ocr_helper_locked()
+    return ''
+
+
+def _stop_ocr_helper():
+    with _ocr_helper_lock:
+        _stop_ocr_helper_locked()
+
+
+atexit.register(_stop_ocr_helper)
 
 
 def _new_ocr_instance():

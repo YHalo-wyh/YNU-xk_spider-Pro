@@ -115,19 +115,23 @@ def is_another_running():
     try:
         paths = get_paths()
         if os.path.exists(paths['lock']):
-            with open(paths['lock'], 'r') as f:
+            with open(paths['lock'], 'r', encoding='utf-8') as f:
                 old_pid = int(f.read().strip())
             if psutil.pid_exists(old_pid) and old_pid != os.getpid():
-                # 检查进程名确认是否是 Watchdog
                 try:
                     proc = psutil.Process(old_pid)
                     name = proc.name().lower()
-                    if 'python' in name or 'watchdog' in name:
+                    command = ' '.join(proc.cmdline()).lower()
+                    # A reused PID belonging to an unrelated Python process
+                    # must never suppress the real watchdog.
+                    if 'watchdog' in name or 'run_watchdog.py' in command:
                         return True
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
+            # Dead, reused or malformed locks are safe to replace.
+            remove_lock()
     except Exception:
-        pass
+        remove_lock()
     return False
 
 
@@ -228,10 +232,24 @@ def main_loop(main_pid):
         try:
             time.sleep(CHECK_INTERVAL)
 
-            # 信号文件判断：只有 action=start 才继续守护
-            if not should_continue_guarding():
+            # Read the target from the signal each cycle.  If a newly opened
+            # main window takes ownership while an older watchdog still
+            # exists, the watchdog follows it instead of guarding a dead PID.
+            signal = load_signal() or {}
+            if str(signal.get('action', '')).lower() != 'start':
                 log("检测到 stop/无效信号，守护进程退出")
                 break
+            try:
+                signaled_pid = int(signal.get('pid', 0) or 0)
+            except (TypeError, ValueError):
+                signaled_pid = 0
+            if (
+                signaled_pid > 0
+                and signaled_pid != main_pid
+                and psutil.pid_exists(signaled_pid)
+            ):
+                log(f"守护目标已切换: {main_pid} -> {signaled_pid}")
+                main_pid = signaled_pid
             
             # 检查主程序是否存活
             if psutil.pid_exists(main_pid):
@@ -290,6 +308,7 @@ def main_loop(main_pid):
 def main():
     """入口"""
     if is_another_running():
+        log("检测到已有有效 Watchdog，新实例退出并由原实例接管最新信号")
         return
     
     write_lock()
