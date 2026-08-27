@@ -1,21 +1,93 @@
 """Isolated captcha OCR entry point for the frozen Windows application.
 
 Qt and ONNX Runtime can load incompatible native runtime DLLs in the same
-process.  This helper intentionally imports no PyQt modules.  It supports the
-legacy one-shot stdin mode plus a length-prefixed persistent server mode.
+process. This helper keeps the existing default ddddocr classifier's model,
+charset, preprocessing, and CTC decoding path without bundling unused OCR
+features such as detection, sliders, APIs, and OpenCV.
 """
+import ast
 import base64
+import io
+import os
 import re
 import struct
 import sys
 
+import numpy as np
+import onnxruntime
+from PIL import Image
+
+
+def _resource_path(filename):
+    base_dir = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_dir, "ocr_helper_data", filename)
+
+
+def _load_old_charset():
+    charset_path = _resource_path("charsets.py")
+    with open(charset_path, "r", encoding="utf-8") as source_file:
+        module = ast.parse(source_file.read(), filename=charset_path)
+    for statement in module.body:
+        if (
+            isinstance(statement, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "CHARSET_OLD"
+                for target in statement.targets
+            )
+        ):
+            return ast.literal_eval(statement.value)
+    raise RuntimeError("CHARSET_OLD is missing from the bundled charset data")
+
+
+class CaptchaClassifier:
+    """Minimal equivalent of ddddocr's default classification path."""
+
+    def __init__(self):
+        onnxruntime.set_default_logger_severity(3)
+        self.charset = _load_old_charset()
+        self.session = onnxruntime.InferenceSession(
+            _resource_path("common_old.onnx"),
+            providers=["CPUExecutionProvider"],
+        )
+        self.input_name = self.session.get_inputs()[0].name
+
+    @staticmethod
+    def _preprocess(image_bytes):
+        image = Image.open(io.BytesIO(image_bytes))
+        target_height = 64
+        target_width = int(image.size[0] * (target_height / image.size[1]))
+        image = image.resize((target_width, target_height), Image.LANCZOS)
+        image = image.convert("L")
+        image_array = np.array(image).astype(np.float32) / 255.0
+        image_array = np.expand_dims(image_array, axis=0)
+        return np.expand_dims(image_array, axis=0)
+
+    def classification(self, image_bytes):
+        output = self.session.run(None, {
+            self.input_name: self._preprocess(image_bytes),
+        })[0]
+        if len(output.shape) == 3:
+            if output.shape[1] == 1:
+                predicted_indices = np.argmax(output[:, 0, :], axis=1)
+            else:
+                predicted_indices = np.argmax(output[0, :, :], axis=1)
+        else:
+            predicted_indices = np.argmax(output, axis=-1)
+            if predicted_indices.ndim == 0:
+                predicted_indices = np.array([predicted_indices])
+
+        result = []
+        previous_index = None
+        for index in predicted_indices:
+            index = int(index)
+            if index != previous_index and index != 0 and index < len(self.charset):
+                result.append(self.charset[index])
+            previous_index = index
+        return "".join(result)
+
 
 def _create_ocr():
-    import ddddocr
-    try:
-        return ddddocr.DdddOcr(show_ad=False)
-    except TypeError:
-        return ddddocr.DdddOcr()
+    return CaptchaClassifier()
 
 
 def _classify(ocr, image_bytes):

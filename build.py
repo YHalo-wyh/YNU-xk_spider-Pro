@@ -127,8 +127,10 @@ def build_exe():
         if os.path.exists(folder):
             shutil.rmtree(folder)
     
-    for f in os.listdir("."):
-        if f.endswith(".spec"):
+    # PyInstaller creates these generated specs; keep the checked-in
+    # OCRHelper.spec available for manual/reproducible builds.
+    for f in ["run_gui.spec", "run_ocr_helper.spec", "run_watchdog.spec"]:
+        if os.path.exists(f):
             os.remove(f)
     
     # PyInstaller 参数 - 打包主程序
@@ -194,8 +196,22 @@ def build_exe():
         "--console",
         "--noconfirm",
         "--clean",
-        "--collect-all=ddddocr",
+        # Keep the isolated helper, but ship only ddddocr's currently used
+        # default classifier assets rather than its API, detection and slider
+        # feature set.
+        "--add-data=.venv\\Lib\\site-packages\\ddddocr\\common_old.onnx;ocr_helper_data",
+        "--add-data=.venv\\Lib\\site-packages\\ddddocr\\charsets.py;ocr_helper_data",
+        "--collect-binaries=onnxruntime",
         "--exclude-module=PyQt5",
+        "--exclude-module=ddddocr",
+        "--exclude-module=cv2",
+        "--exclude-module=tensorflow",
+        "--exclude-module=torch",
+        "--exclude-module=paddle",
+        "--exclude-module=matplotlib",
+        "--exclude-module=scipy",
+        "--exclude-module=pandas",
+        "--exclude-module=tkinter",
     ]
     if upx_dir:
         ocr_args.append(f"--upx-dir={upx_dir}")
