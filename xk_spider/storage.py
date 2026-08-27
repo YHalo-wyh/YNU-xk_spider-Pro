@@ -97,6 +97,19 @@ def read_json(path, default=None):
         return default
 
 
+def monitor_state_batch_status(state, current_batch_code):
+    """Classify whether persisted teaching-class IDs belong to this batch."""
+    if not isinstance(state, dict) or not state.get("courses"):
+        return "empty"
+    saved_batch_code = str(state.get("batch_code") or "").strip()
+    current_batch_code = str(current_batch_code or "").strip()
+    if not saved_batch_code:
+        return "unknown"
+    if saved_batch_code != current_batch_code:
+        return "mismatch"
+    return "match"
+
+
 def write_json_atomic(path, data):
     """先写临时文件再原子替换，避免异常退出留下半个 JSON。"""
     destination = Path(path)

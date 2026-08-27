@@ -6,7 +6,7 @@ import sys
 import shutil
 import subprocess
 
-APP_VERSION = "v2.6.0"
+APP_VERSION = "v2.7.0"
 ARTIFACT_PREFIX = f"YNU.Pro_{APP_VERSION}"
 SETUP_FILENAME = f"{ARTIFACT_PREFIX}_Setup.exe"
 PORTABLE_FILENAME = f"{ARTIFACT_PREFIX}_Portable.zip"
@@ -116,7 +116,7 @@ def build_exe():
     print("=" * 50)
     
     sanitize_build_environment()
-    check_and_install("pyinstaller")
+    check_and_install("PyInstaller")
     
     # 检查 UPX
     upx_dir = check_upx()
@@ -401,11 +401,14 @@ def main():
     print("2. 同时创建安装包和便携版 ZIP")
     print("\n按 Enter 开始，Ctrl+C 取消...")
     
-    try:
-        input()
-    except KeyboardInterrupt:
-        print("\n已取消")
-        return
+    if sys.stdin.isatty():
+        try:
+            input()
+        except EOFError:
+            pass
+        except KeyboardInterrupt:
+            print("\n已取消")
+            return
     
     # 打包 EXE
     if not build_exe():

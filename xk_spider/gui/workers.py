@@ -60,6 +60,8 @@ class UpdateCheckWorker(QThread):
     finished = pyqtSignal(bool, str, str, str)  # (has_update, latest_version, download_url, error)
 
     GITHUB_API_URL = "https://api.github.com/repos/YHalo-wyh/YNU-xk_spider-Pro/releases/latest"
+    GITHUB_LATEST_URL = "https://github.com/YHalo-wyh/YNU-xk_spider-Pro/releases/latest"
+    GITHUB_RELEASE_DOWNLOAD = "https://github.com/YHalo-wyh/YNU-xk_spider-Pro/releases/download"
 
     def __init__(self, current_version):
         super().__init__()
@@ -84,6 +86,43 @@ class UpdateCheckWorker(QThread):
                 return asset.get('browser_download_url')
 
         return None
+
+    def _version_from_release_url(self, url):
+        """Extract a release tag from GitHub's /releases/tag/<tag> redirect."""
+        match = re.search(r'/releases/tag/([^/?#]+)', str(url or ''))
+        return self._normalize_version(match.group(1)) if match else ''
+
+    def _fallback_latest_release(self, session):
+        """Use GitHub's public latest redirect when the rate-limited API fails."""
+        response = session.get(
+            self.GITHUB_LATEST_URL,
+            headers={"Accept": "text/html,application/xhtml+xml"},
+            timeout=(10, 20),
+            allow_redirects=True,
+        )
+        if response.status_code != 200:
+            return '', '', f'GitHub 页面 HTTP {response.status_code}'
+
+        latest_version = self._version_from_release_url(response.url)
+        if not latest_version:
+            return '', '', '无法从 GitHub 发布页识别版本号'
+
+        filename = f"YNU.Pro_v{latest_version}_Setup.exe"
+        download_url = (
+            f"{self.GITHUB_RELEASE_DOWNLOAD}/v{latest_version}/{filename}"
+        )
+        try:
+            asset_response = session.head(
+                download_url,
+                timeout=(8, 15),
+                allow_redirects=True,
+            )
+            if asset_response.status_code != 200:
+                download_url = response.url
+        except requests.exceptions.RequestException:
+            download_url = response.url
+
+        return latest_version, download_url, ''
 
     def run(self):
         try:
@@ -137,7 +176,21 @@ class UpdateCheckWorker(QThread):
                 elif resp.status_code == 404:
                     self.finished.emit(False, '', '', '暂无发布版本')
                 else:
-                    self.finished.emit(False, '', '', f'HTTP {resp.status_code}')
+                    latest_version, download_url, fallback_error = (
+                        self._fallback_latest_release(session)
+                    )
+                    if fallback_error:
+                        self.finished.emit(
+                            False, '', '',
+                            f'GitHub API HTTP {resp.status_code}；{fallback_error}'
+                        )
+                        return
+                    has_update = self._compare_versions(
+                        latest_version, self.current_version
+                    )
+                    self.finished.emit(
+                        has_update, latest_version, download_url, ''
+                    )
 
         except requests.exceptions.Timeout:
             self.finished.emit(False, '', '', '请求超时')
@@ -403,7 +456,7 @@ class CurriculumFetchWorker(QThread):
             "token": self.token,
             "Origin": "https://xk.ynu.edu.cn",
             "Referer": f"{BASE_URL}/*default/curriculum.do",
-            "User-Agent": "Mozilla/5.0 YNU-XK-Helper/2.6.0",
+            "User-Agent": "Mozilla/5.0 YNU-XK-Helper/2.7.0",
         }
         params = {
             "studentCode": self.student_code,
@@ -1601,7 +1654,7 @@ class MultiGrabWorker(QThread):
         """
         # 检查 HTTP 302 跳转
         if response is not None:
-            if response.status_code == 302:
+            if response.status_code in (302, 401, 403):
                 return True
             # 检查是否被重定向到登录页
             if response.history and any(r.status_code == 302 for r in response.history):
@@ -1697,6 +1750,22 @@ class MultiGrabWorker(QThread):
         finally:
             self._relogin_in_progress = False
             self._relogin_mutex.unlock()
+
+    def _query_failure(self, reason, course, **details):
+        """Return a diagnostic-only result without changing monitor safety rules."""
+        detail_text = ', '.join(
+            f"{key}={value}" for key, value in details.items()
+            if value not in (None, '')
+        )
+        context = (
+            f"course={course.get('KCM', '')}, "
+            f"tc_id={course.get('JXBID', '')}, "
+            f"batch={self.batch_code}, reason={reason}"
+        )
+        if detail_text:
+            context = f"{context}, {detail_text}"
+        self._logger.warning(f"课程余量查询失败: {context}")
+        return None, None, {'query_error': reason, **details}
     
     def _api_query_course_capacity(self, course, retry_on_expired=True):
         """
@@ -1753,9 +1822,17 @@ class MultiGrabWorker(QThread):
                 return 'session_expired', None, None
             
             if resp.status_code != 200:
-                return None, None, None
-            
-            result = resp.json()
+                return self._query_failure(
+                    'http_error', course, status=resp.status_code
+                )
+
+            try:
+                result = resp.json()
+            except ValueError:
+                return self._query_failure(
+                    'invalid_json', course,
+                    content_type=resp.headers.get('Content-Type', '')
+                )
             
             # 检查 Session 过期
             if self._is_session_expired(result=result):
@@ -1764,7 +1841,23 @@ class MultiGrabWorker(QThread):
                         return self._api_query_course_capacity(course, retry_on_expired=False)
                 return 'session_expired', None, None
             
+            result_code = str(result.get('code', '') or '')
+            result_msg = str(result.get('msg', '') or '')
+            if result_code and result_code != '1' and 'dataList' not in result:
+                return self._query_failure(
+                    'api_rejected', course, code=result_code, msg=result_msg[:120]
+                )
+
             data_list = result.get('dataList', [])
+            if not isinstance(data_list, list):
+                return self._query_failure(
+                    'invalid_data_list', course,
+                    data_type=type(data_list).__name__
+                )
+            if not data_list:
+                return self._query_failure(
+                    'empty_result', course, code=result_code, msg=result_msg[:120]
+                )
             
             # 在返回列表中查找目标教学班
             for item in data_list:
@@ -1796,13 +1889,21 @@ class MultiGrabWorker(QThread):
                         
                         return remain, capacity, item
             
-            # 未找到目标课程（可能被过滤），返回 None 触发盲抢
-            return None, None, None
-            
+            return self._query_failure(
+                'teaching_class_not_found', course,
+                result_count=len(data_list), query=query_content
+            )
+
         except requests.exceptions.Timeout:
-            return None, None, None
-        except Exception:
-            return None, None, None
+            return self._query_failure('timeout', course)
+        except requests.exceptions.RequestException as error:
+            return self._query_failure(
+                'request_error', course, error=type(error).__name__
+            )
+        except Exception as error:
+            return self._query_failure(
+                'unexpected_error', course, error=type(error).__name__
+            )
 
     def _api_select_course_fast(self, course, retry_on_expired=True):
         """
@@ -2655,11 +2756,37 @@ class MultiGrabWorker(QThread):
             # ========== 安全策略 1: 彻底删除盲抢逻辑 ==========
             # 查询失败 (remain is None) - 直接跳过，绝不盲抢
             if remain is None:
-                if state.get('last_status') != 'query_failed':
-                    self.status.emit(f"[SKIP] {course_name} 查询失败，跳过本次循环（安全模式）")
-                    self._logger.warning(f"查询失败，跳过: {course_name}")
+                reason = (
+                    course_info.get('query_error', 'unknown')
+                    if isinstance(course_info, dict) else 'unknown'
+                )
+                reason_label = {
+                    'http_error': '服务器 HTTP 异常',
+                    'invalid_json': '服务器返回格式异常',
+                    'api_rejected': '服务器拒绝查询',
+                    'invalid_data_list': '课程列表格式异常',
+                    'empty_result': '当前批次查询结果为空',
+                    'teaching_class_not_found': '当前批次未找到教学班',
+                    'timeout': '请求超时',
+                    'request_error': '网络请求异常',
+                    'unexpected_error': '程序解析异常',
+                    'unknown': '未知原因',
+                }.get(reason, reason)
+                last_reason = state.get('last_query_error')
+                last_logged_at = state.get('last_query_error_log_at', 0)
+                if reason != last_reason or time.time() - last_logged_at >= 60:
+                    self.status.emit(
+                        f"[SKIP] {course_name} 查询失败：{reason_label} "
+                        f"({reason})，跳过本次循环（安全模式）"
+                    )
+                    self._logger.warning(
+                        f"查询失败，跳过: {course_name}, reason={reason}, "
+                        f"tc_id={tc_id}, batch={self.batch_code}"
+                    )
+                    state['last_query_error'] = reason
+                    state['last_query_error_log_at'] = time.time()
                     state['last_status'] = 'query_failed'
-                
+
                 # 休眠后继续下次查询
                 time.sleep(1.5)
                 continue

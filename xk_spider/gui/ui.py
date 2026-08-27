@@ -44,7 +44,8 @@ from .utils import (
 )
 from xk_spider.storage import (
     CONFIG_FILE, WATCHDOG_LOCK_FILE,
-    migrate_legacy_data, read_json, write_json_atomic,
+    migrate_legacy_data, monitor_state_batch_status, read_json,
+    write_json_atomic,
 )
 from .icons import icon, VectorIconWidget
 from .theme import (
@@ -936,7 +937,7 @@ class MainWindow(QMainWindow):
     curriculum_updated = pyqtSignal(list, list, str)
     
     # 版本信息
-    VERSION = "v2.6.0"
+    VERSION = "v2.7.0"
     GITHUB_URL = "https://github.com/YHalo-wyh/YNU-xk_spider-Pro"
     RELEASES_URL = f"{GITHUB_URL}/releases"
     
@@ -1022,6 +1023,7 @@ class MainWindow(QMainWindow):
         # 检查是否需要恢复监控（闪退恢复）
         self._pending_restore_state = None
         state = self.load_monitor_state()
+        self._loaded_monitor_state = state if isinstance(state, dict) else None
         if state and state.get('courses'):
             self._restore_saved_watchlist(state)
             if state.get('is_monitoring'):
@@ -3329,12 +3331,15 @@ class MainWindow(QMainWindow):
     def save_monitor_state(self, is_monitoring=False):
         """保存监控状态到文件（用于闪退恢复）"""
         state = {
+            'schema_version': 2,
             'is_monitoring': is_monitoring,
             'courses': [],
             'course_type': self.course_type_combo.currentText(),
             'concurrency': self.concurrency_spin.value(),
             'conflict_policy': self._active_conflict_policy if is_monitoring else None,
             'swap_risk_confirmed': self._swap_risk_confirmed if is_monitoring else False,
+            'batch_code': self.batch_code,
+            'batch_name': self.batch_name,
             'timestamp': time.time(),
         }
         
@@ -3347,12 +3352,45 @@ class MainWindow(QMainWindow):
         
         try:
             write_json_atomic(MONITOR_STATE_FILE, state)
+            self._loaded_monitor_state = state
         except Exception as e:
             self._logger.error(f"保存监控状态失败: {e}")
 
     def load_monitor_state(self):
         """加载监控状态文件"""
         return read_json(MONITOR_STATE_FILE)
+
+    def _discard_incompatible_saved_watchlist(self):
+        """Do not carry teaching-class IDs across elective batches."""
+        state = self._loaded_monitor_state
+        status = monitor_state_batch_status(state, self.batch_code)
+        if status in ('empty', 'match'):
+            return False
+
+        course_count = len(state.get('courses', [])) if isinstance(state, dict) else 0
+        saved_batch = str(state.get('batch_code') or '') if isinstance(state, dict) else ''
+        self.grab_list.clear()
+        self.grab_count_label.setText("待抢: 0 门")
+        self._pending_restore_state = None
+        self._pending_monitor_courses = []
+        self._active_conflict_policy = None
+        self._swap_risk_confirmed = False
+
+        if status == 'mismatch':
+            detail = f"保存批次 {saved_batch}，当前批次 {self.batch_code}"
+        else:
+            detail = "旧版状态未记录所属批次"
+        self.log(
+            f"[WARN] 未恢复 {course_count} 门旧待选课程：{detail}。"
+            "请从当前批次课程列表重新添加。"
+        )
+        self.statusBar().showMessage(
+            "检测到跨批次待选课程，已安全清除，请从当前批次重新添加",
+            12000,
+        )
+        self.save_monitor_state(is_monitoring=False)
+        self._loaded_monitor_state = self.load_monitor_state()
+        return True
 
     def _restore_saved_watchlist(self, state):
         """恢复上次保存的待选课程和界面设置，但不自动开始监控。"""
@@ -3615,7 +3653,9 @@ class MainWindow(QMainWindow):
             self.batch_label.setText(f"选课批次：{self.batch_code}")
             self.log(f"[INFO] BatchCode: {self.batch_code}")
         self.statusBar().showMessage("纯 API 模式已就绪，课程列表自动刷新中...")
-        
+
+        self._discard_incompatible_saved_watchlist()
+
         # 优先从状态文件恢复（闪退恢复）
         if self._pending_restore_state and self._pending_restore_state.get('courses'):
             courses = self._pending_restore_state['courses']
