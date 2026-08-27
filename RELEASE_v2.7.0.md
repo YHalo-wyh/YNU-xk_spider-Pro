@@ -64,9 +64,12 @@
 
 发布附件同时提供 SHA-256 校验值。下载后可在 PowerShell 中执行：
 
+| 文件 | SHA-256 |
+| --- | --- |
+| `YNU.Pro_v2.7.0_Setup.exe` | `711F7069884C96D4BA4B642EBECDC72E4D30F40FD637C9ABB8AC80BD9A25BFBA` |
+| `YNU.Pro_v2.7.0_Portable.zip` | `DBBAAC70D41DD24E8E6E8C0D6271AD6476A0DE11C394EA9D4CDBB17BDD85A759` |
+
 ```powershell
 Get-FileHash .\YNU.Pro_v2.7.0_Setup.exe -Algorithm SHA256
 Get-FileHash .\YNU.Pro_v2.7.0_Portable.zip -Algorithm SHA256
 ```
-
-校验值以 GitHub Release 页面最终公布内容为准。
