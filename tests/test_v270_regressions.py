@@ -1,10 +1,40 @@
+import os
+import tempfile
 import unittest
+import io
 from unittest.mock import Mock
 
+import numpy as np
 import requests
+from PIL import Image
 
 from xk_spider.storage import monitor_state_batch_status
 from xk_spider.gui.workers import MultiGrabWorker, UpdateCheckWorker
+from build import resolve_ocr_data_files, verify_ocr_helper_runtime
+from run_ocr_helper import CaptchaClassifier
+
+
+class OCRPackagingTests(unittest.TestCase):
+    def test_preprocess_matches_ddddocr_model_normalization(self):
+        image = Image.fromarray(np.array([[0, 255]], dtype=np.uint8), mode="L")
+        payload = io.BytesIO()
+        image.save(payload, format="PNG")
+
+        tensor = CaptchaClassifier._preprocess(payload.getvalue())
+
+        self.assertAlmostEqual(float(tensor.min()), -1.0, places=5)
+        self.assertAlmostEqual(float(tensor.max()), 1.0, places=5)
+
+    def test_resolves_ocr_assets_from_active_environment(self):
+        for path in resolve_ocr_data_files():
+            self.assertTrue(os.path.isfile(path), path)
+
+    def test_runtime_smoke_check_rejects_non_helper(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake_helper = os.path.join(directory, "OCRHelper.exe")
+            with open(fake_helper, "wb") as target:
+                target.write(b"not an executable")
+            self.assertFalse(verify_ocr_helper_runtime(fake_helper, timeout=1))
 
 
 class MonitorStateBatchTests(unittest.TestCase):

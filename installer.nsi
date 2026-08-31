@@ -50,6 +50,7 @@ Section "Install"
     Delete "$INSTDIR\YNU选课助手Pro.exe"
     Delete "$INSTDIR\Watchdog.exe"
     RMDir /r "$INSTDIR\_internal"
+    RMDir /r "$INSTDIR\OCRHelperRuntime"
 
     SetOutPath "$INSTDIR"
     File /r "dist\YNU选课助手Pro\*.*"

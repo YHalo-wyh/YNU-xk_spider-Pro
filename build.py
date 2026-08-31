@@ -5,6 +5,7 @@ import os
 import sys
 import shutil
 import subprocess
+import importlib.util
 
 APP_VERSION = "v2.7.0"
 ARTIFACT_PREFIX = f"YNU.Pro_{APP_VERSION}"
@@ -109,6 +110,83 @@ def check_upx():
         print(f"[WARN] UPX 下载失败: {e}")
         return None
 
+
+def resolve_ocr_data_files():
+    """Locate the two ddddocr assets used by the isolated classifier.
+
+    The old build assumed that the active interpreter lived in a project-local
+    ``.venv``. PyInstaller may run from another environment, so derive the
+    paths from the package imported by the active build interpreter.
+    """
+    spec = importlib.util.find_spec("ddddocr")
+    if spec is None or not spec.submodule_search_locations:
+        raise RuntimeError("ddddocr 未安装在当前打包 Python 环境中")
+
+    package_dir = os.fspath(next(iter(spec.submodule_search_locations)))
+    model_path = os.path.join(package_dir, "common_old.onnx")
+    if not os.path.isfile(model_path):
+        raise RuntimeError(f"ddddocr OCR 模型缺失: {model_path}")
+
+    charset_path = os.path.join(package_dir, "charsets.py")
+    if not os.path.isfile(charset_path):
+        # ddddocr 1.4.x embeds the default charset in DdddOcr.__init__, while
+        # newer releases expose charsets.py. Generate the tiny data module so
+        # the frozen helper remains independent from the full ddddocr package.
+        try:
+            import ddddocr
+
+            classifier = ddddocr.DdddOcr(show_ad=False)
+            charset = getattr(classifier, "_DdddOcr__charset")
+        except Exception as error:
+            raise RuntimeError(f"无法从 ddddocr 提取默认字符集: {error}") from error
+        generated_dir = os.path.abspath(
+            os.path.join("build", "generated_ocr_data")
+        )
+        os.makedirs(generated_dir, exist_ok=True)
+        charset_path = os.path.join(generated_dir, "charsets.py")
+        with open(charset_path, "w", encoding="utf-8", newline="\n") as target:
+            target.write(f"CHARSET_OLD = {charset!r}\n")
+
+    return model_path, charset_path
+
+
+def verify_ocr_helper_runtime(helper_path, timeout=60):
+    """Start the frozen helper and require its READY handshake.
+
+    Checking only that ``OCRHelper.exe`` exists allowed a broken release whose
+    executable was present but whose ``onnxruntime`` package was absent. This
+    smoke test exercises Python/native module loading and ONNX model loading.
+    """
+    process = None
+    try:
+        process = subprocess.Popen(
+            [helper_path, "--server"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=os.path.dirname(helper_path),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        stdout, stderr = process.communicate(input=b"", timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
+        print("[ERROR] OCRHelper 运行时自检超时")
+        return False
+    except Exception as error:
+        print(f"[ERROR] OCRHelper 运行时无法启动: {error}")
+        return False
+
+    if process.returncode != 0 or not stdout.startswith(b"READY\n"):
+        diagnostic = stderr.decode("utf-8", errors="replace").strip()
+        print(
+            "[ERROR] OCRHelper 运行时自检失败: "
+            f"exit={process.returncode}, stderr={diagnostic or '(empty)'}"
+        )
+        return False
+    print("[OK] OCRHelper 运行时自检通过（ONNX 模型已成功加载）")
+    return True
+
 def build_exe():
     """打包为exe"""
     print("\n" + "=" * 50)
@@ -189,6 +267,11 @@ def build_exe():
         return False
 
     print("[*] 正在打包独立验证码 OCR 进程...")
+    try:
+        ocr_model_path, ocr_charset_path = resolve_ocr_data_files()
+    except RuntimeError as error:
+        print(f"[ERROR] {error}")
+        return False
     ocr_args = [
         "run_ocr_helper.py",
         "--name=OCRHelper",
@@ -199,9 +282,14 @@ def build_exe():
         # Keep the isolated helper, but ship only ddddocr's currently used
         # default classifier assets rather than its API, detection and slider
         # feature set.
-        "--add-data=.venv\\Lib\\site-packages\\ddddocr\\common_old.onnx;ocr_helper_data",
-        "--add-data=.venv\\Lib\\site-packages\\ddddocr\\charsets.py;ocr_helper_data",
+        f"--add-data={ocr_model_path};ocr_helper_data",
+        f"--add-data={ocr_charset_path};ocr_helper_data",
+        # Collect native provider DLLs and force the Python package imports.
+        # Using --collect-all would also pull large unused transformer/tooling
+        # modules; the helper only needs InferenceSession from onnxruntime.capi.
         "--collect-binaries=onnxruntime",
+        "--hidden-import=onnxruntime",
+        "--hidden-import=onnxruntime.capi._pybind_state",
         "--exclude-module=PyQt5",
         "--exclude-module=ddddocr",
         "--exclude-module=cv2",
@@ -261,6 +349,11 @@ def build_exe():
 
     if not os.path.exists(os.path.join(target_ocr_dir, "OCRHelper.exe")):
         print("[ERROR] 独立 OCR 运行目录复制失败")
+        return False
+
+    if not verify_ocr_helper_runtime(
+        os.path.abspath(os.path.join(target_ocr_dir, "OCRHelper.exe"))
+    ):
         return False
 
     if not verify_runtime_data_isolation(main_dist_dir):
@@ -333,6 +426,7 @@ Section "Install"
     Delete "$INSTDIR\\YNU选课助手Pro.exe"
     Delete "$INSTDIR\\Watchdog.exe"
     RMDir /r "$INSTDIR\\_internal"
+    RMDir /r "$INSTDIR\\OCRHelperRuntime"
 
     SetOutPath "$INSTDIR"
     File /r "dist\\YNU选课助手Pro\\*.*"

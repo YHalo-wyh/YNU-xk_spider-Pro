@@ -59,6 +59,9 @@ class CaptchaClassifier:
         image = image.resize((target_width, target_height), Image.LANCZOS)
         image = image.convert("L")
         image_array = np.array(image).astype(np.float32) / 255.0
+        # Match ddddocr's default common_old.onnx preprocessing exactly.
+        # The model was trained on [-1, 1], not raw [0, 1] grayscale values.
+        image_array = (image_array - 0.5) / 0.5
         image_array = np.expand_dims(image_array, axis=0)
         return np.expand_dims(image_array, axis=0)
 

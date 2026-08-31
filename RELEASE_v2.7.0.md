@@ -68,6 +68,9 @@ v2.7.0 修复选课批次切换后恢复旧待选课程导致持续查询失败�
 - 保留 OCR 隔离进程，避免 ONNX Runtime 与主程序 Qt 依赖发生 DLL 冲突。
 - OCR 运行时仅打包验证码分类所需的 `common_old.onnx`、字符集和必要依赖。
 - 移除未使用的检测模型、旧模型副本、滑块识别、API 和 OpenCV 内容，缩小发布包体积。
+- 修复发布包中的 `OCRHelper.exe` 缺少 `onnxruntime` Python 包、导致登录时验证码始终识别失败的问题。
+- 修复精简 OCR Helper 漏掉 `[-1, 1]` 灰度归一化、导致验证码识别率异常的问题。
+- 打包完成后会实际启动 OCR Helper 并加载 ONNX 模型；自检未收到 `READY` 握手时禁止生成发布包。
 
 ## 安全说明
 
@@ -81,8 +84,8 @@ v2.7.0 修复选课批次切换后恢复旧待选课程导致持续查询失败�
 
 ## 下载
 
-- `YNU.Pro_v2.7.0_Setup.exe`：安装版，SHA-256：`2C43562F4FCD5A47AFB590EC3C17A0DD8101532194C6546C46C22092C276DC6D`
-- `YNU.Pro_v2.7.0_Portable.zip`：便携版，SHA-256：`EC4666723EA45F3B0FD61627150EDFED760FE6C86FD02EEB39AE4DAE5594CAAC`
+- `YNU.Pro_v2.7.0_Setup.exe`：安装版，SHA-256：`B5E62038318CA61966C0A5B9E2B4BDC4E9D37CC84FE9473213167642A7FF0F16`
+- `YNU.Pro_v2.7.0_Portable.zip`：便携版，SHA-256：`CBBBB36E44E20E297B7469FCF79891B61810C61DECF5318E287EF6C48DAFA6BF`
 
 安装版默认安装到当前用户目录，不需要管理员权限。账号配置、待选课程、监控策略和日志保存在独立用户数据目录，覆盖安装不会主动删除这些数据。
 
