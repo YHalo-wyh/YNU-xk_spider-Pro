@@ -1252,6 +1252,11 @@ class MultiGrabWorker(QThread):
         self._relogin_in_progress = False
         self._relogin_mutex = QMutex()  # 重登互斥锁
         self._relogin_failed_permanently = False  # 永久失败标志（密码错误等）
+        # Waiters must observe the result of the current relogin attempt,
+        # rather than treating the old non-empty token as success.
+        self._relogin_generation = 0
+        self._relogin_result_generation = 0
+        self._relogin_last_result = False
         
         # 每门课程的状态追踪（减少日志噪音）
         self._course_states = {}  # tc_id -> {'last_remain': int, 'last_status': str}
@@ -1357,6 +1362,15 @@ class MultiGrabWorker(QThread):
                 session.close()
             except Exception:
                 pass
+
+    def _close_one_http_session(self, session):
+        """Remove and close a short-lived session used by relogin."""
+        with self._sessions_lock:
+            self._sessions.discard(session)
+        try:
+            session.close()
+        except Exception:
+            pass
 
     def _mask_username(self):
         username = str(self.username or '')
@@ -1627,10 +1641,18 @@ class MultiGrabWorker(QThread):
                     self.login_status.emit(True, "在线")
                     self.status.emit("[登录] 登录状态正常")
             else:
-                # 非 200 状态码，可能是服务器问题或登录过期
+                # 401/403 也可能是限流、WAF 或接口权限策略，只有响应
+                # 明确表现为登录失效时才触发重登，避免重登风暴。
                 self.login_status.emit(False, f"HTTP {resp.status_code}")
-                self.status.emit(f"[登录] 异常状态 HTTP {resp.status_code}，尝试重登...")
-                self._handle_session_expired()
+                if self._is_session_expired(response=resp):
+                    self.status.emit(
+                        f"[登录] 异常状态 HTTP {resp.status_code}，尝试重登..."
+                    )
+                    self._handle_session_expired()
+                else:
+                    self.status.emit(
+                        f"[登录] HTTP {resp.status_code}，暂不判定为登录失效"
+                    )
                 
         except requests.exceptions.Timeout:
             self.login_status.emit(False, "网络超时")
@@ -1654,8 +1676,21 @@ class MultiGrabWorker(QThread):
         """
         # 检查 HTTP 302 跳转
         if response is not None:
-            if response.status_code in (302, 401, 403):
+            if response.status_code == 302:
                 return True
+            if response.status_code == 401:
+                return True
+            if response.status_code == 403:
+                # 403 is commonly used by the server for request rejection or
+                # rate limiting. Inspect the response before treating it as auth expiry.
+                location = str(response.headers.get('Location', '')).lower()
+                body = str(getattr(response, 'text', '') or '').lower()
+                auth_keywords = (
+                    'login', '登录', '未登录', 'session', 'token', '认证', '授权',
+                    '过期', '失效',
+                )
+                if any(keyword in location or keyword in body for keyword in auth_keywords):
+                    return True
             # 检查是否被重定向到登录页
             if response.history and any(r.status_code == 302 for r in response.history):
                 return True
@@ -1694,6 +1729,10 @@ class MultiGrabWorker(QThread):
         if self._relogin_failed_permanently:
             return False
         
+        # Capture this before attempting the lock. The owner may increment the
+        # generation immediately after tryLock fails.
+        observed_generation = self._relogin_generation
+
         # 尝试获取锁
         if not self._relogin_mutex.tryLock():
             # 其他线程正在重登，等待完成
@@ -1701,16 +1740,20 @@ class MultiGrabWorker(QThread):
             max_wait = 30  # 最多等待30秒
             waited = 0
             while waited < max_wait:
+                if not self._running:
+                    return False
                 time.sleep(0.5)
                 waited += 0.5
                 # 尝试获取锁检查是否完成
                 if self._relogin_mutex.tryLock():
                     self._relogin_mutex.unlock()
-                    break
-            
-            # 检查重登是否成功（通过 token 是否更新判断）
-            if self.token and not self._relogin_failed_permanently:
-                return True
+                    return (
+                        self._relogin_result_generation >= observed_generation
+                        and self._relogin_last_result
+                        and not self._relogin_failed_permanently
+                    )
+
+            self.status.emit("[自动重登] 等待重登结果超时")
             return False
         
         try:
@@ -1720,9 +1763,17 @@ class MultiGrabWorker(QThread):
             
             # 检查是否正在重登（双重检查）
             if self._relogin_in_progress:
-                return self.token != ''
+                # An old token is not proof that this relogin succeeded.
+                return (
+                    self._relogin_result_generation >= observed_generation
+                    and self._relogin_last_result
+                    and not self._relogin_failed_permanently
+                )
             
             self._relogin_in_progress = True
+            self._relogin_generation += 1
+            relogin_generation = self._relogin_generation
+            self._relogin_last_result = False
             self.status.emit("[自动重登] Session已过期，正在后台恢复...")
             
             # 执行重登，最多3次
@@ -1736,6 +1787,8 @@ class MultiGrabWorker(QThread):
                 
                 if success:
                     self.status.emit("[自动重登] 恢复成功")
+                    self._relogin_last_result = True
+                    self._relogin_result_generation = relogin_generation
                     return True
                 
                 # 如果是密码错误等致命错误，标记永久失败
@@ -1748,6 +1801,8 @@ class MultiGrabWorker(QThread):
             return False
             
         finally:
+            if not self._relogin_last_result:
+                self._relogin_result_generation = self._relogin_generation
             self._relogin_in_progress = False
             self._relogin_mutex.unlock()
 
@@ -2604,6 +2659,7 @@ class MultiGrabWorker(QThread):
         max_captcha_retries = 5
         for captcha_attempt in range(max_captcha_retries):
             if not self._running:
+                self._close_one_http_session(session)
                 return False, '', ''
             
             try:
@@ -2680,6 +2736,7 @@ class MultiGrabWorker(QThread):
                         self.token = new_token
                         self.cookies = new_cookies
                         self.session_updated.emit(new_token, new_cookies)
+                        self._close_one_http_session(session)
                         return True, new_token, new_cookies
                 
                 # 验证码错误，重试
@@ -2692,12 +2749,14 @@ class MultiGrabWorker(QThread):
                 if result_code == '2' or any(k in msg for k in ('密码', '用户名', '登录名', '账号')):
                     self.status.emit(f"[自动重登] 账号密码错误: {msg}")
                     self._relogin_failed_permanently = True
+                    self._close_one_http_session(session)
                     return False, '', ''
                 
             except Exception as e:
                 time.sleep(0.3)
                 continue
         
+        self._close_one_http_session(session)
         return False, '', ''
     
     def _api_relogin(self):
@@ -2748,7 +2807,8 @@ class MultiGrabWorker(QThread):
             # Session 过期处理（已在 _api_query_course_capacity 内部自动重试）
             if remain == 'session_expired':
                 # 自动重登已失败，通知 UI
-                self.need_relogin.emit()
+                if self._running:
+                    self.need_relogin.emit()
                 break
             
             state = self._course_states.get(tc_id, {})
@@ -2926,7 +2986,8 @@ class MultiGrabWorker(QThread):
                             self.status.emit(f"[WARN] 选课返回成功但核实未选中，继续监控...")
                 
                 elif msg == "session_expired":
-                    self.need_relogin.emit()
+                    if self._running:
+                        self.need_relogin.emit()
                     break
                 
                 elif need_rollback:
@@ -3119,7 +3180,8 @@ class MultiGrabWorker(QThread):
                                     )
                                     self._logger.error("健康检查: 自动恢复失败，建议手动重启")
                                     # 发送需要重登信号，让UI处理
-                                    self.need_relogin.emit()
+                                    if self._running:
+                                        self.need_relogin.emit()
                                     break
                         else:
                             # 已达最大尝试次数，等待用户干预

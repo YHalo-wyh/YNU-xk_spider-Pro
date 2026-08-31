@@ -102,7 +102,7 @@ def setup_exception_hook():
     def exception_hook(exc_type, exc_value, exc_tb):
         # 记录到崩溃日志
         try:
-            log_crash(exc_value)
+            log_crash(exc_value, exc_type=exc_type, exc_tb=exc_tb)
         except Exception:
             pass
         
@@ -123,7 +123,11 @@ def setup_exception_hook():
     # 同时处理线程中的异常
     def thread_exception_hook(args):
         try:
-            log_crash(args.exc_value)
+            log_crash(
+                args.exc_value,
+                exc_type=args.exc_type,
+                exc_tb=args.exc_traceback,
+            )
         except Exception:
             pass
     
@@ -137,7 +141,7 @@ def load_monitor_state_simple():
     return read_json(MONITOR_STATE_FILE)
 
 
-def log_crash(error):
+def log_crash(error, exc_type=None, exc_tb=None):
     """记录崩溃日志"""
     try:
         os.makedirs(LOG_DIR, exist_ok=True)
@@ -148,7 +152,10 @@ def log_crash(error):
             f.write(f"\n{'='*50}\n")
             f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 程序崩溃\n")
             f.write(f"错误: {error}\n")
-            f.write(traceback.format_exc())
+            if exc_type is not None and exc_tb is not None:
+                f.write(''.join(traceback.format_exception(exc_type, error, exc_tb)))
+            else:
+                f.write(traceback.format_exc())
     except Exception:
         pass
 

@@ -959,6 +959,10 @@ class MainWindow(QMainWindow):
         self._is_manual_login_attempt = False
         self._manual_login_fail_count = 0
         self._auto_relogin_retry_count = 0
+        self._login_in_progress = False
+        self._auto_relogin_in_progress = False
+        self._login_generation = 0
+        self._closing = False
         self._installing_update = False
         self._update_resume_monitoring = False
         self._active_conflict_policy = None
@@ -3571,6 +3575,15 @@ class MainWindow(QMainWindow):
         self.login()
 
     def login(self):
+        if self._closing:
+            return
+        if self._login_in_progress:
+            self._logger.info("已有登录请求在进行中，忽略重复登录请求")
+            return
+        if self._auto_relogin_in_progress:
+            self._logger.info("自动重登进行中，忽略手动登录请求")
+            return
+
         username = self.username_input.text().strip()
         password = self.password_input.text().strip()
         
@@ -3593,11 +3606,49 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'login_feedback_label'):
             self.login_feedback_label.setText("正在连接云南大学选课系统")
         
-        self.login_worker = LoginWorker(username, password)
-        self.login_worker.success.connect(self.on_login_success)
-        self.login_worker.failed.connect(self.on_login_failed)
-        self.login_worker.status.connect(self._show_login_status)
-        self.login_worker.start()
+        worker = LoginWorker(username, password)
+        self.login_worker = worker
+        self._login_in_progress = True
+        self._login_generation += 1
+        generation = self._login_generation
+        worker.success.connect(
+            lambda *args, worker=worker, generation=generation:
+            self._handle_login_success(worker, generation, *args)
+        )
+        worker.failed.connect(
+            lambda msg, worker=worker, generation=generation:
+            self._handle_login_failed(worker, generation, msg)
+        )
+        worker.status.connect(
+            lambda msg, worker=worker, generation=generation:
+            self._handle_login_status(worker, generation, msg)
+        )
+        worker.start()
+
+    def _is_current_login_worker(self, worker, generation=None):
+        return (
+            worker is getattr(self, 'login_worker', None)
+            and (generation is None or generation == self._login_generation)
+        )
+
+    def _handle_login_status(self, worker, generation, msg):
+        if self._is_current_login_worker(worker, generation):
+            self._show_login_status(msg)
+
+    def _handle_login_success(self, worker, generation, *args):
+        if not self._is_current_login_worker(worker, generation):
+            self._logger.warning("忽略旧登录 worker 的成功回调")
+            return
+        self._login_in_progress = False
+        self._auto_relogin_in_progress = False
+        self.on_login_success(*args)
+
+    def _handle_login_failed(self, worker, generation, msg):
+        if not self._is_current_login_worker(worker, generation):
+            self._logger.warning("忽略旧登录 worker 的失败回调")
+            return
+        self._login_in_progress = False
+        self.on_login_failed(msg)
 
     def _show_login_status(self, msg):
         self.statusBar().showMessage(str(msg))
@@ -3749,6 +3800,11 @@ class MainWindow(QMainWindow):
         
         was_monitoring = self.multi_grab_worker is not None
         self.stop_monitoring(reason='logout')
+        # Invalidate late callbacks from a login request that may still be
+        # finishing in its background thread.
+        self._login_generation += 1
+        self._login_in_progress = False
+        self._auto_relogin_in_progress = False
         self.is_logged_in = False
         self.token = ''
         self.batch_code = ''
@@ -4584,15 +4640,50 @@ class MainWindow(QMainWindow):
             conflict_policy=conflict_policy,
         )
         
-        self.multi_grab_worker.success.connect(self.on_grab_success)
-        self.multi_grab_worker.failed.connect(self.on_grab_failed)
-        self.multi_grab_worker.status.connect(self.on_grab_status)
-        self.multi_grab_worker.need_relogin.connect(self.on_need_relogin)
-        self.multi_grab_worker.course_available.connect(self.on_course_available)
-        self.multi_grab_worker.session_updated.connect(self.on_session_updated)
-        self.multi_grab_worker.finished.connect(self.on_worker_finished)
-        self.multi_grab_worker.heartbeat.connect(self.update_heartbeat)
-        self.multi_grab_worker.courses_retired.connect(self.on_courses_retired)
+        worker = self.multi_grab_worker
+        worker.success.connect(
+            lambda msg, course, worker=worker: self._handle_worker_signal(
+                worker, self.on_grab_success, msg, course
+            )
+        )
+        worker.failed.connect(
+            lambda msg, worker=worker: self._handle_worker_signal(
+                worker, self.on_grab_failed, msg
+            )
+        )
+        worker.status.connect(
+            lambda msg, worker=worker: self._handle_worker_signal(
+                worker, self.on_grab_status, msg
+            )
+        )
+        worker.need_relogin.connect(
+            lambda worker=worker: self._handle_worker_need_relogin(worker)
+        )
+        worker.course_available.connect(
+            lambda course_name, teacher, remain, capacity, worker=worker:
+            self._handle_worker_signal(
+                worker, self.on_course_available,
+                course_name, teacher, remain, capacity
+            )
+        )
+        worker.session_updated.connect(
+            lambda token, cookies, worker=worker: self._handle_worker_signal(
+                worker, self.on_session_updated, token, cookies
+            )
+        )
+        worker.finished.connect(
+            lambda worker=worker: self._handle_worker_finished(worker)
+        )
+        worker.heartbeat.connect(
+            lambda count, worker=worker: self._handle_worker_signal(
+                worker, self.update_heartbeat, count
+            )
+        )
+        worker.courses_retired.connect(
+            lambda tc_ids, reason, worker=worker: self._handle_worker_signal(
+                worker, self.on_courses_retired, tc_ids, reason
+            )
+        )
 
         # 写入守护信号并按需启动 watchdog
         self.write_watchdog_signal('start', pid=os.getpid())
@@ -4613,13 +4704,16 @@ class MainWindow(QMainWindow):
         was_monitoring = self.multi_grab_worker is not None
 
         if self.multi_grab_worker:
-            self.multi_grab_worker.stop()
+            worker = self.multi_grab_worker
+            worker.stop()
             wait_ms = 10000 if reason == 'update' else 5000
-            if not self.multi_grab_worker.wait(wait_ms):
+            if not worker.wait(wait_ms):
                 self._logger.warning(f"停止监控超时: reason={reason}")
-                if reason == 'update':
-                    return False
-            self.multi_grab_worker = None
+                # Keep the reference while the old worker is alive. Replacing
+                # it here would allow late signals to overlap a new worker.
+                return False
+            if self.multi_grab_worker is worker:
+                self.multi_grab_worker = None
         
         self.start_grab_btn.setEnabled(True)
         self.stop_grab_btn.setEnabled(False)
@@ -4757,10 +4851,35 @@ class MainWindow(QMainWindow):
                 self._logger.error(f"on_worker_finished 异常: {str(e)[:50]}")
             except Exception:
                 pass
+
+    def _handle_worker_finished(self, worker):
+        """Ignore completion signals from workers no longer owned by the UI."""
+        if worker is not self.multi_grab_worker:
+            return
+        self.on_worker_finished()
+
+    def _handle_worker_signal(self, worker, callback, *args):
+        """Guard every monitor callback against late signals from old workers."""
+        if worker is self.multi_grab_worker:
+            callback(*args)
+
+    def _handle_worker_need_relogin(self, worker):
+        """Accept relogin requests only from the active monitor worker."""
+        if worker is not self.multi_grab_worker:
+            self._logger.warning("忽略旧监控 worker 的重登请求")
+            return
+        self.on_need_relogin()
     
     def on_need_relogin(self):
         """需要重登回调 - 带异常保护"""
         try:
+            if self._closing:
+                return
+            if self._auto_relogin_in_progress:
+                self._logger.info("自动重登已在进行中，忽略重复重登请求")
+                return
+
+            self._auto_relogin_in_progress = True
             self.log("[WARN] Session过期，准备自动重登...")
             
             pending_courses = []
@@ -4775,20 +4894,46 @@ class MainWindow(QMainWindow):
             self._pending_resume_swap_risk_confirmed = self._swap_risk_confirmed
             self.log(f"[INFO] 已保存 {len(pending_courses)} 门待抢课程")
 	            
-            self.stop_monitoring(clear_state=False, reason='relogin')
+            if not self.stop_monitoring(clear_state=False, reason='relogin'):
+                worker = self.multi_grab_worker
+                self.log("[WARN] 正在等待旧监控 worker 完全退出，再继续自动重登")
+                QTimer.singleShot(
+                    500,
+                    lambda worker=worker: self._continue_relogin_after_worker_stop(worker),
+                )
+                return
             self._auto_relogin_and_resume()
         except Exception as e:
             try:
                 self._logger.error(f"on_need_relogin 异常: {str(e)[:50]}")
             except Exception:
                 pass
+
+    def _continue_relogin_after_worker_stop(self, worker):
+        if worker is not self.multi_grab_worker:
+            self._auto_relogin_in_progress = False
+            return
+        if worker.isRunning():
+            QTimer.singleShot(
+                500,
+                lambda worker=worker: self._continue_relogin_after_worker_stop(worker),
+            )
+            return
+        if self.stop_monitoring(clear_state=False, reason='relogin'):
+            self._auto_relogin_and_resume()
     
     def _auto_relogin_and_resume(self):
+        if self._closing:
+            return
+        if self._login_in_progress:
+            return
+
         username = self.username_input.text().strip()
         password = self.password_input.text().strip()
         
         if not username or not password:
             self.log("[ERROR] 无法自动重登：缺少用户名或密码")
+            self._auto_relogin_in_progress = False
             return
         
         self._is_manual_login_attempt = False
@@ -4798,11 +4943,31 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)
         
-        self.login_worker = LoginWorker(username, password)
-        self.login_worker.success.connect(self.on_login_success)
-        self.login_worker.failed.connect(self._on_auto_relogin_failed)
-        self.login_worker.status.connect(self._show_login_status)
-        self.login_worker.start()
+        worker = LoginWorker(username, password)
+        self.login_worker = worker
+        self._login_in_progress = True
+        self._login_generation += 1
+        generation = self._login_generation
+        worker.success.connect(
+            lambda *args, worker=worker, generation=generation:
+            self._handle_login_success(worker, generation, *args)
+        )
+        worker.failed.connect(
+            lambda msg, worker=worker, generation=generation:
+            self._handle_auto_relogin_failed(worker, generation, msg)
+        )
+        worker.status.connect(
+            lambda msg, worker=worker, generation=generation:
+            self._handle_login_status(worker, generation, msg)
+        )
+        worker.start()
+
+    def _handle_auto_relogin_failed(self, worker, generation, msg):
+        if not self._is_current_login_worker(worker, generation):
+            self._logger.warning("忽略旧自动重登 worker 的失败回调")
+            return
+        self._login_in_progress = False
+        self._on_auto_relogin_failed(msg)
     
     def _on_auto_relogin_failed(self, msg):
         self.login_btn.setEnabled(True)
@@ -4810,6 +4975,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         self.log(f"[ERROR] 自动重登失败: {msg}")
         if '登录名或密码不正确' in str(msg):
+            self._auto_relogin_in_progress = False
             self._auto_relogin_retry_count = 0
             self.save_monitor_state(is_monitoring=False)
             self.statusBar().showMessage("自动重登已停止：请重新输入正确的账号密码")
@@ -4893,12 +5059,27 @@ class MainWindow(QMainWindow):
             event.accept()
             return
 
+        self._closing = True
+
         # 保存监控状态（如果正在监控中则标记 is_monitoring=True，用于重启恢复）
         is_monitoring = self.multi_grab_worker is not None and self.multi_grab_worker.isRunning()
         self.save_monitor_state(is_monitoring=is_monitoring)
         
         self.poll_timer.stop()
+        self._login_generation += 1
+        self._login_in_progress = False
+        self._auto_relogin_in_progress = False
+        login_worker = getattr(self, 'login_worker', None)
+        if login_worker is not None and login_worker.isRunning():
+            self._logger.info("窗口关闭等待登录 worker 退出")
+            QTimer.singleShot(500, self.close)
+            event.ignore()
+            return
         # 关闭程序时不清除状态文件，让程序可以自动重启恢复
-        self.stop_monitoring(clear_state=False, reason='close')
+        if not self.stop_monitoring(clear_state=False, reason='close'):
+            self._logger.info("窗口关闭等待监控 worker 退出")
+            QTimer.singleShot(500, self.close)
+            event.ignore()
+            return
         self.save_config()
         event.accept()

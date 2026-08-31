@@ -65,13 +65,24 @@ class CourseMonitorDiagnosticsTests(unittest.TestCase):
             "number": "COURSE001",
         }
 
-    def test_http_401_and_403_are_session_expired(self):
+    def test_http_401_is_expired_but_plain_403_is_not(self):
         worker = MultiGrabWorker.__new__(MultiGrabWorker)
-        for status in (401, 403):
-            response = requests.Response()
-            response.status_code = status
-            response.history = []
-            self.assertTrue(worker._is_session_expired(response=response))
+        response = requests.Response()
+        response.status_code = 401
+        response.history = []
+        self.assertTrue(worker._is_session_expired(response=response))
+
+        response = requests.Response()
+        response.status_code = 403
+        response.history = []
+        response._content = b"rate limit"
+        self.assertFalse(worker._is_session_expired(response=response))
+
+        response = requests.Response()
+        response.status_code = 403
+        response.history = []
+        response._content = "登录状态已过期".encode("utf-8")
+        self.assertTrue(worker._is_session_expired(response=response))
 
     def test_missing_teaching_class_reports_specific_reason(self):
         response = Mock()
