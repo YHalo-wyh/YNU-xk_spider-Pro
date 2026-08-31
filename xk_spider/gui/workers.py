@@ -1257,6 +1257,14 @@ class MultiGrabWorker(QThread):
         self._relogin_generation = 0
         self._relogin_result_generation = 0
         self._relogin_last_result = False
+
+        # Authentication state is versioned independently from the worker.
+        # A response sent with an older token must never expire a newer login.
+        self._auth_state_lock = threading.Lock()
+        self._auth_generation = 0
+        self._auth_401_generation = 0
+        self._auth_401_streak = 0
+        self._auth_401_last_at = 0.0
         
         # 每门课程的状态追踪（减少日志噪音）
         self._course_states = {}  # tc_id -> {'last_remain': int, 'last_status': str}
@@ -1352,6 +1360,45 @@ class MultiGrabWorker(QThread):
         return self._request_with_session(
             self._get_http_session(), method, url, **kwargs
         )
+
+    def _get_auth_snapshot(self):
+        """Return one consistent token/cookie generation for an HTTP request."""
+        with self._auth_state_lock:
+            return self._auth_generation, self.token, self.cookies
+
+    def _replace_auth_session(self, token, cookies):
+        """Install a successful relogin result and invalidate older responses."""
+        with self._auth_state_lock:
+            self.token = token
+            self.cookies = cookies
+            self._auth_generation += 1
+            self._auth_401_generation = self._auth_generation
+            self._auth_401_streak = 0
+            self._auth_401_last_at = 0.0
+            return self._auth_generation
+
+    def _request_authenticated(self, method, url, **kwargs):
+        """Send an authenticated request with a generation-consistent session.
+
+        ``requests`` merges a Session cookie jar with the per-request ``cookies``
+        argument.  After relogin that can produce two JSESSIONID values (old and
+        new) in one Cookie header.  Reset the current thread's private jar to the
+        captured login state instead, so the server receives exactly one session.
+        """
+        generation, token, cookies = self._get_auth_snapshot()
+        headers = dict(kwargs.pop('headers', {}) or {})
+        headers['token'] = token
+        headers.setdefault(
+            'Referer', f"{BASE_URL}/*default/grablessons.do?token={token}"
+        )
+
+        session = self._get_http_session()
+        session.cookies.clear()
+        session.cookies.update(self._parse_cookies(cookies))
+        response = self._request_with_session(
+            session, method, url, headers=headers, **kwargs
+        )
+        return generation, response
 
     def _close_http_sessions(self):
         with self._sessions_lock:
@@ -1597,7 +1644,7 @@ class MultiGrabWorker(QThread):
             # 重置标志位，允许下次检测
             self._login_check_in_progress = False
     
-    def _check_login_status(self):
+    def _check_login_status(self, retry_on_stale=True):
         """检测登录状态 - 使用已选课程接口"""
         if not self._running:
             return
@@ -1614,19 +1661,33 @@ class MultiGrabWorker(QThread):
                 "electiveBatchCode": self.batch_code,
             }
             
-            resp = self._request('GET',
+            request_generation, resp = self._request_authenticated('GET',
                 url,
-                headers=self._get_headers(),
-                cookies=self._parse_cookies(self.cookies),
                 params=params,
                 timeout=(3, 8),  # 增加超时时间，避免卡住
                 allow_redirects=False
             )
-            
-            # 检查 302 跳转（Session 过期）
-            if resp.status_code == 302:
+
+            if self._is_session_expired(response=resp):
+                action = self._session_expiry_action(
+                    request_generation, response=resp, source='login_check'
+                )
+                if action == 'stale':
+                    if retry_on_stale:
+                        self._check_login_status(retry_on_stale=False)
+                    return
+                if action == 'confirm':
+                    self.status.emit(
+                        f"[登录] HTTP {resp.status_code} 为单次异常，等待下次请求复核"
+                    )
+                    return
+                if action == 'verify' and self._probe_current_session(
+                    request_generation
+                ):
+                    self.status.emit("[登录] 交叉复核通过，当前 Session 正常")
+                    return
                 self.login_status.emit(False, "Session 已过期")
-                self.status.emit("[登录] Session 已过期，需要重新登录")
+                self.status.emit("[登录] Session 已确认过期，尝试恢复")
                 self._handle_session_expired()
                 return
             
@@ -1634,25 +1695,37 @@ class MultiGrabWorker(QThread):
                 result = resp.json()
                 # 检查响应内容是否表示过期
                 if self._is_session_expired(result=result):
-                    self.login_status.emit(False, "Session 已过期")
-                    self.status.emit("[登录] Session 已过期，需要重新登录")
-                    self._handle_session_expired()
+                    action = self._session_expiry_action(
+                        request_generation, result=result, source='login_check'
+                    )
+                    if action == 'stale':
+                        if retry_on_stale:
+                            self._check_login_status(retry_on_stale=False)
+                    elif action == 'confirm':
+                        self.status.emit("[登录] 单次会话异常，等待下次请求复核")
+                    elif action == 'verify' and self._probe_current_session(
+                        request_generation
+                    ):
+                        self.status.emit("[登录] 交叉复核通过，当前 Session 正常")
+                    elif action == 'relogin':
+                        self.login_status.emit(False, "Session 已过期")
+                        self.status.emit("[登录] Session 已确认过期，尝试恢复")
+                        self._handle_session_expired()
+                    else:
+                        self.login_status.emit(False, "Session 已过期")
+                        self.status.emit("[登录] 交叉复核失败，尝试恢复")
+                        self._handle_session_expired()
                 else:
+                    self._record_authenticated_success(request_generation)
                     self.login_status.emit(True, "在线")
                     self.status.emit("[登录] 登录状态正常")
             else:
                 # 401/403 也可能是限流、WAF 或接口权限策略，只有响应
                 # 明确表现为登录失效时才触发重登，避免重登风暴。
                 self.login_status.emit(False, f"HTTP {resp.status_code}")
-                if self._is_session_expired(response=resp):
-                    self.status.emit(
-                        f"[登录] 异常状态 HTTP {resp.status_code}，尝试重登..."
-                    )
-                    self._handle_session_expired()
-                else:
-                    self.status.emit(
-                        f"[登录] HTTP {resp.status_code}，暂不判定为登录失效"
-                    )
+                self.status.emit(
+                    f"[登录] HTTP {resp.status_code}，暂不判定为登录失效"
+                )
                 
         except requests.exceptions.Timeout:
             self.login_status.emit(False, "网络超时")
@@ -1662,11 +1735,12 @@ class MultiGrabWorker(QThread):
             self.status.emit(f"[登录] 检测异常: {str(e)[:50]}")
             # 不要在这里抛出异常，避免影响主监控循环
     
-    def _get_headers(self):
+    def _get_headers(self, token=None):
         """获取请求头"""
+        token = self.token if token is None else token
         return {
-            "token": self.token,
-            "Referer": f"{BASE_URL}/*default/grablessons.do?token={self.token}",
+            "token": token,
+            "Referer": f"{BASE_URL}/*default/grablessons.do?token={token}",
         }
     
     def _is_session_expired(self, response=None, result=None, msg=''):
@@ -1719,6 +1793,88 @@ class MultiGrabWorker(QThread):
                     return True
         
         return False
+
+    def _record_authenticated_success(self, request_generation):
+        """A successful protected request disproves an isolated 401."""
+        with self._auth_state_lock:
+            if request_generation != self._auth_generation:
+                return
+            self._auth_401_generation = request_generation
+            self._auth_401_streak = 0
+            self._auth_401_last_at = 0.0
+
+    def _session_expiry_action(
+        self, request_generation, response=None, result=None, msg='', source='api'
+    ):
+        """Return ``stale``, ``confirm``, ``verify`` or ``relogin``.
+
+        Redirects and explicit API expiry payloads remain decisive.  A bare 401
+        is confirmed by a second consecutive protected-request failure.  This
+        preserves fast recovery (the monitor retries every second) without
+        turning an endpoint-specific transient 401 into a relogin storm.
+        """
+        with self._auth_state_lock:
+            if request_generation != self._auth_generation:
+                self._logger.info(
+                    f"忽略旧 token 响应: source={source}, "
+                    f"request_generation={request_generation}, "
+                    f"current_generation={self._auth_generation}"
+                )
+                return 'stale'
+
+            status = response.status_code if response is not None else None
+            if status != 401:
+                return 'relogin'
+
+            now = time.monotonic()
+            if (
+                self._auth_401_generation != request_generation
+                or now - self._auth_401_last_at > 10.0
+            ):
+                self._auth_401_generation = request_generation
+                self._auth_401_streak = 0
+            self._auth_401_streak += 1
+            self._auth_401_last_at = now
+            streak = self._auth_401_streak
+
+        self._logger.warning(
+            f"受保护接口返回 HTTP 401: source={source}, "
+            f"generation={request_generation}, consecutive={streak}/2"
+        )
+        return 'verify' if streak >= 2 else 'confirm'
+
+    def _probe_current_session(self, expected_generation):
+        """Cross-check repeated 401s against a separate protected endpoint."""
+        with self._auth_state_lock:
+            if expected_generation != self._auth_generation:
+                return True
+
+        try:
+            request_generation, response = self._request_authenticated(
+                'GET',
+                f"{BASE_URL}/elective/courseResult.do",
+                params={
+                    'timestamp': str(int(time.time() * 1000)),
+                    'studentCode': self.student_code,
+                    'electiveBatchCode': self.batch_code,
+                },
+                timeout=(3, 5),
+                allow_redirects=False,
+            )
+            if request_generation != expected_generation:
+                return True
+            if response.status_code != 200:
+                return False
+            result = response.json()
+            if self._is_session_expired(response=response, result=result):
+                return False
+            self._record_authenticated_success(request_generation)
+            self._logger.info(
+                f"会话交叉复核成功: generation={request_generation}"
+            )
+            return True
+        except (requests.exceptions.RequestException, ValueError, TypeError):
+            return False
     
     def _handle_session_expired(self):
         """
@@ -1859,10 +2015,8 @@ class MultiGrabWorker(QThread):
             url = f"{BASE_URL}/elective/{api_endpoint}"
             data = {"querySetting": json.dumps(query_param, ensure_ascii=False)}
             
-            resp = self._request('POST',
+            request_generation, resp = self._request_authenticated('POST',
                 url,
-                headers=self._get_headers(),
-                cookies=self._parse_cookies(self.cookies),
                 data=data,
                 timeout=(3, 5),
                 allow_redirects=False  # 禁止自动重定向，便于检测302
@@ -1870,6 +2024,28 @@ class MultiGrabWorker(QThread):
             
             # 检查 302 跳转
             if resp.status_code == 302 or self._is_session_expired(response=resp):
+                action = self._session_expiry_action(
+                    request_generation, response=resp, source='capacity'
+                )
+                if action == 'stale':
+                    if retry_on_expired:
+                        return self._api_query_course_capacity(
+                            course, retry_on_expired=False
+                        )
+                    return self._query_failure(
+                        'stale_auth_response', course, status=resp.status_code
+                    )
+                if action == 'confirm':
+                    return self._query_failure(
+                        'auth_challenge_unconfirmed', course,
+                        status=resp.status_code
+                    )
+                if action == 'verify' and self._probe_current_session(
+                    request_generation
+                ):
+                    return self._api_query_course_capacity(
+                        course, retry_on_expired=False
+                    )
                 if retry_on_expired:
                     if self._handle_session_expired():
                         # 重登成功，立即重试
@@ -1891,10 +2067,25 @@ class MultiGrabWorker(QThread):
             
             # 检查 Session 过期
             if self._is_session_expired(result=result):
+                action = self._session_expiry_action(
+                    request_generation, result=result, source='capacity_payload'
+                )
+                if action == 'stale':
+                    if retry_on_expired:
+                        return self._api_query_course_capacity(
+                            course, retry_on_expired=False
+                        )
+                    return self._query_failure('stale_auth_response', course)
+                if action == 'confirm':
+                    return self._query_failure(
+                        'auth_challenge_unconfirmed', course
+                    )
                 if retry_on_expired:
                     if self._handle_session_expired():
                         return self._api_query_course_capacity(course, retry_on_expired=False)
                 return 'session_expired', None, None
+
+            self._record_authenticated_success(request_generation)
             
             result_code = str(result.get('code', '') or '')
             result_msg = str(result.get('msg', '') or '')
@@ -2000,10 +2191,8 @@ class MultiGrabWorker(QThread):
             
             self._logger.info(f"选课请求: tc_id={tc_id}, type={course_type_code}")
             
-            resp = self._request('POST',
+            request_generation, resp = self._request_authenticated('POST',
                 url,
-                headers=self._get_headers(),
-                cookies=self._parse_cookies(self.cookies),
                 data=payload,
                 timeout=(3, 5),
                 allow_redirects=False
@@ -2011,6 +2200,25 @@ class MultiGrabWorker(QThread):
             
             # 检查 302 跳转
             if resp.status_code == 302 or self._is_session_expired(response=resp):
+                action = self._session_expiry_action(
+                    request_generation, response=resp, source='select'
+                )
+                if action == 'stale':
+                    if retry_on_expired:
+                        return self._api_select_course_fast(
+                            course, retry_on_expired=False
+                        )
+                    return False, "stale_auth_response", False
+                if action == 'confirm' and retry_on_expired:
+                    return self._api_select_course_fast(
+                        course, retry_on_expired=True
+                    )
+                if action == 'verify' and self._probe_current_session(
+                    request_generation
+                ):
+                    return self._api_select_course_fast(
+                        course, retry_on_expired=False
+                    )
                 if retry_on_expired:
                     if self._handle_session_expired():
                         return self._api_select_course_fast(course, retry_on_expired=False)
@@ -2028,10 +2236,22 @@ class MultiGrabWorker(QThread):
             
             # 检查 Session 过期
             if self._is_session_expired(result=result, msg=msg):
+                action = self._session_expiry_action(
+                    request_generation, result=result, msg=msg,
+                    source='select_payload'
+                )
+                if action == 'stale':
+                    if retry_on_expired:
+                        return self._api_select_course_fast(
+                            course, retry_on_expired=False
+                        )
+                    return False, "stale_auth_response", False
                 if retry_on_expired:
                     if self._handle_session_expired():
                         return self._api_select_course_fast(course, retry_on_expired=False)
                 return False, "session_expired", False
+
+            self._record_authenticated_success(request_generation)
             
             if code == '1':
                 self._logger.info(f"选课成功: {tc_id}")
@@ -2081,17 +2301,34 @@ class MultiGrabWorker(QThread):
             
             self._logger.info(f"退课请求: tc_id={tc_id}, params={params}")
             
-            resp = self._request('GET',
+            request_generation, resp = self._request_authenticated('GET',
                 url,
                 params=params,
-                headers=self._get_headers(),
-                cookies=self._parse_cookies(self.cookies),
                 timeout=(3, 5),
                 allow_redirects=False
             )
             
             # 检查 302 跳转
             if resp.status_code == 302 or self._is_session_expired(response=resp):
+                action = self._session_expiry_action(
+                    request_generation, response=resp, source='delete'
+                )
+                if action == 'stale':
+                    if retry_on_expired:
+                        return self._api_delete_course(
+                            tc_id, course_type, retry_on_expired=False
+                        )
+                    return False, "stale_auth_response"
+                if action == 'confirm' and retry_on_expired:
+                    return self._api_delete_course(
+                        tc_id, course_type, retry_on_expired=True
+                    )
+                if action == 'verify' and self._probe_current_session(
+                    request_generation
+                ):
+                    return self._api_delete_course(
+                        tc_id, course_type, retry_on_expired=False
+                    )
                 if retry_on_expired:
                     if self._handle_session_expired():
                         return self._api_delete_course(tc_id, course_type, retry_on_expired=False)
@@ -2109,10 +2346,22 @@ class MultiGrabWorker(QThread):
             
             # 检查 Session 过期
             if self._is_session_expired(result=result, msg=msg):
+                action = self._session_expiry_action(
+                    request_generation, result=result, msg=msg,
+                    source='delete_payload'
+                )
+                if action == 'stale':
+                    if retry_on_expired:
+                        return self._api_delete_course(
+                            tc_id, course_type, retry_on_expired=False
+                        )
+                    return False, "stale_auth_response"
                 if retry_on_expired:
                     if self._handle_session_expired():
                         return self._api_delete_course(tc_id, course_type, retry_on_expired=False)
                 return False, "session_expired"
+
+            self._record_authenticated_success(request_generation)
             
             if code == '1':
                 self._logger.info(f"退课成功: {tc_id}")
@@ -2141,11 +2390,9 @@ class MultiGrabWorker(QThread):
                 "electiveBatchCode": self.batch_code,
             }
             
-            resp = self._request('GET',
+            request_generation, resp = self._request_authenticated('GET',
                 url,
                 params=params,
-                headers=self._get_headers(),
-                cookies=self._parse_cookies(self.cookies),
                 timeout=(3, 5),
             )
             
@@ -2156,6 +2403,7 @@ class MultiGrabWorker(QThread):
             result = resp.json()
             if result.get('code') == '-1':
                 return None
+            self._record_authenticated_success(request_generation)
             
             selected_ids = []
             data_list = result.get('dataList', []) or result.get('data', [])
@@ -2186,11 +2434,9 @@ class MultiGrabWorker(QThread):
                 "electiveBatchCode": self.batch_code,
             }
             
-            resp = self._request('GET',
+            request_generation, resp = self._request_authenticated('GET',
                 url,
                 params=params,
-                headers=self._get_headers(),
-                cookies=self._parse_cookies(self.cookies),
                 timeout=(3, 5),
             )
             
@@ -2203,6 +2449,7 @@ class MultiGrabWorker(QThread):
             
             if result.get('code') == '-1':
                 return None
+            self._record_authenticated_success(request_generation)
             
             selected_courses = []
             data_list = result.get('dataList', []) or result.get('data', [])
@@ -2733,8 +2980,7 @@ class MultiGrabWorker(QThread):
                     new_cookies = '; '.join([f"{k}={v}" for k, v in session.cookies.get_dict().items()])
                     
                     if new_token:
-                        self.token = new_token
-                        self.cookies = new_cookies
+                        self._replace_auth_session(new_token, new_cookies)
                         self.session_updated.emit(new_token, new_cookies)
                         self._close_one_http_session(session)
                         return True, new_token, new_cookies
@@ -2830,6 +3076,8 @@ class MultiGrabWorker(QThread):
                     'timeout': '请求超时',
                     'request_error': '网络请求异常',
                     'unexpected_error': '程序解析异常',
+                    'auth_challenge_unconfirmed': '单次 401，待下次请求复核',
+                    'stale_auth_response': '已忽略旧 token 的延迟响应',
                     'unknown': '未知原因',
                 }.get(reason, reason)
                 last_reason = state.get('last_query_error')
@@ -3294,15 +3542,16 @@ class MultiGrabWorker(QThread):
             timestamp = str(int(time.time() * 1000))
             url = f"{BASE_URL}/elective/courseResult.do"
             
-            resp = self._request('GET',
+            request_generation, resp = self._request_authenticated('GET',
                 url,
-                headers=self._get_headers(),
-                cookies=self._parse_cookies(self.cookies),
                 params={"timestamp": timestamp, "studentCode": self.student_code, "electiveBatchCode": self.batch_code},
                 timeout=(3, 5),
             )
-            
-            return resp.status_code == 200 and not self._is_session_expired(response=resp)
+
+            success = resp.status_code == 200 and not self._is_session_expired(response=resp)
+            if success:
+                self._record_authenticated_success(request_generation)
+            return success
         except:
             return False
     
