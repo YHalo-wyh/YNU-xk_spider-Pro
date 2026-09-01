@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import importlib.util
 
-APP_VERSION = "v2.7.0"
+APP_VERSION = "v2.8.0"
 ARTIFACT_PREFIX = f"YNU.Pro_{APP_VERSION}"
 SETUP_FILENAME = f"{ARTIFACT_PREFIX}_Setup.exe"
 PORTABLE_FILENAME = f"{ARTIFACT_PREFIX}_Portable.zip"

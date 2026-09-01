@@ -937,7 +937,7 @@ class MainWindow(QMainWindow):
     curriculum_updated = pyqtSignal(list, list, str)
     
     # 版本信息
-    VERSION = "v2.7.0"
+    VERSION = "v2.8.0"
     GITHUB_URL = "https://github.com/YHalo-wyh/YNU-xk_spider-Pro"
     RELEASES_URL = f"{GITHUB_URL}/releases"
     
@@ -4540,8 +4540,8 @@ class MainWindow(QMainWindow):
             return
         
         if self.grab_list.count() == 0:
-            self._show_standard_message(
-                self, QMessageBox.Warning, "提示", "请先添加待抢课程"
+            self._show_centered_message(
+                QMessageBox.Warning, "提示", "待抢列表为空，请先添加待抢课程"
             )
             return
         
@@ -4684,6 +4684,11 @@ class MainWindow(QMainWindow):
                 worker, self.on_courses_retired, tc_ids, reason
             )
         )
+        worker.all_courses_processed.connect(
+            lambda worker=worker: self._handle_worker_signal(
+                worker, self.on_all_courses_processed
+            )
+        )
 
         # 写入守护信号并按需启动 watchdog
         self.write_watchdog_signal('start', pid=os.getpid())
@@ -4811,6 +4816,24 @@ class MainWindow(QMainWindow):
                 self._logger.error(f"on_courses_retired 异常: {str(e)[:50]}")
             except Exception:
                 pass
+
+    def on_all_courses_processed(self):
+        """worker 权威队列清空后，同步清空界面列表和持久化状态。"""
+        try:
+            self.grab_list.clear()
+            self.grab_count_label.setText("待抢: 0 门")
+            self._pending_monitor_courses = []
+            self._active_conflict_policy = None
+            self._swap_risk_confirmed = False
+            self._refresh_grab_item_visuals()
+            self.save_monitor_state(is_monitoring=False)
+            self.write_watchdog_signal('stop')
+            self.statusBar().showMessage("所有课程已处理完毕，待抢列表已清空")
+        except Exception as e:
+            try:
+                self._logger.error(f"on_all_courses_processed 异常: {str(e)[:50]}")
+            except Exception:
+                pass
     
     def on_grab_failed(self, msg):
         """抢课失败回调 - 带异常保护"""
@@ -4842,6 +4865,8 @@ class MainWindow(QMainWindow):
         try:
             self.start_grab_btn.setEnabled(True)
             self.stop_grab_btn.setEnabled(False)
+            self.run_indicator.setText("待机")
+            self._set_run_indicator_state(False)
             
             if self._pending_monitor_courses and not self.is_logged_in:
                 self.log("[INFO] Worker 异常退出，尝试自动重登...")

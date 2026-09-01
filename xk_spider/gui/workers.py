@@ -456,7 +456,7 @@ class CurriculumFetchWorker(QThread):
             "token": self.token,
             "Origin": "https://xk.ynu.edu.cn",
             "Referer": f"{BASE_URL}/*default/curriculum.do",
-            "User-Agent": "Mozilla/5.0 YNU-XK-Helper/2.7.0",
+            "User-Agent": "Mozilla/5.0 YNU-XK-Helper/2.8.0",
         }
         params = {
             "studentCode": self.student_code,
@@ -1211,6 +1211,7 @@ class MultiGrabWorker(QThread):
     heartbeat = pyqtSignal(int)           # 心跳信号 (总请求次数)
     login_status = pyqtSignal(bool, str)  # 登录状态信号 (是否在线, 状态描述)
     courses_retired = pyqtSignal(list, str)  # (自动停止的课程ID列表, 原因)
+    all_courses_processed = pyqtSignal()  # worker 内部待抢课程已经全部处理完毕
     
     def __init__(self, courses, student_code, batch_code, token, cookies,
                  campus='02', username='', password='', max_workers=5,
@@ -3353,6 +3354,7 @@ class MultiGrabWorker(QThread):
             # 检查是否还有课程在监控
             if not self._get_courses_snapshot():
                 self.status.emit("[INFO] 所有课程已处理完毕")
+                self.all_courses_processed.emit()
                 break
             
             # 检查是否有新添加的课程需要启动监控

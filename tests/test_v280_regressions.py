@@ -5,6 +5,7 @@ import io
 import threading
 import time
 from unittest.mock import Mock, patch
+from types import SimpleNamespace
 
 import numpy as np
 import requests
@@ -12,6 +13,7 @@ from PIL import Image
 
 from xk_spider.storage import monitor_state_batch_status
 from xk_spider.gui.workers import MultiGrabWorker, UpdateCheckWorker
+from xk_spider.gui.ui import MainWindow, QMessageBox
 from build import resolve_ocr_data_files, verify_ocr_helper_runtime
 from run_ocr_helper import CaptchaClassifier
 
@@ -64,14 +66,14 @@ class MonitorStateBatchTests(unittest.TestCase):
 
 class UpdateCheckFallbackTests(unittest.TestCase):
     def test_extracts_latest_tag_from_redirect_url(self):
-        worker = UpdateCheckWorker("v2.6.0")
+        worker = UpdateCheckWorker("v2.7.0")
         self.assertEqual(
             worker._version_from_release_url(
-                "https://github.com/YHalo-wyh/YNU-xk_spider-Pro/releases/tag/v2.7.0"
+                "https://github.com/YHalo-wyh/YNU-xk_spider-Pro/releases/tag/v2.8.0"
             ),
-            "2.7.0",
+            "2.8.0",
         )
-        self.assertTrue(worker._compare_versions("2.7.0", "v2.6.0"))
+        self.assertTrue(worker._compare_versions("2.8.0", "v2.7.0"))
 
 
 class CourseMonitorDiagnosticsTests(unittest.TestCase):
@@ -319,6 +321,71 @@ class CourseMonitorDiagnosticsTests(unittest.TestCase):
         self.assertEqual(len(success_events), 1)
         self.assertIn("已确认选中", success_events[0][0])
         self.assertEqual(success_events[0][1]["JXBID"], "target-class")
+        self.assertEqual(worker._get_courses_snapshot(), [])
+
+
+class MonitorCompletionUITests(unittest.TestCase):
+    def test_empty_watchlist_warning_uses_centered_dialog(self):
+        centered_message = Mock()
+        window = SimpleNamespace(
+            is_logged_in=True,
+            grab_list=Mock(count=Mock(return_value=0)),
+            _show_centered_message=centered_message,
+        )
+
+        MainWindow.start_monitoring(window)
+
+        centered_message.assert_called_once_with(
+            QMessageBox.Warning,
+            "提示",
+            "待抢列表为空，请先添加待抢课程",
+        )
+
+    def test_authoritative_completion_clears_ui_and_saved_watchlist(self):
+        status_bar = Mock()
+        window = SimpleNamespace(
+            grab_list=Mock(),
+            grab_count_label=Mock(),
+            _pending_monitor_courses=[{"JXBID": "target-class"}],
+            _active_conflict_policy={"groups": []},
+            _swap_risk_confirmed=True,
+            _refresh_grab_item_visuals=Mock(),
+            save_monitor_state=Mock(),
+            write_watchdog_signal=Mock(),
+            statusBar=Mock(return_value=status_bar),
+            _logger=Mock(),
+        )
+
+        MainWindow.on_all_courses_processed(window)
+
+        window.grab_list.clear.assert_called_once_with()
+        window.grab_count_label.setText.assert_called_once_with("待抢: 0 门")
+        self.assertEqual(window._pending_monitor_courses, [])
+        self.assertIsNone(window._active_conflict_policy)
+        self.assertFalse(window._swap_risk_confirmed)
+        window.save_monitor_state.assert_called_once_with(is_monitoring=False)
+        window.write_watchdog_signal.assert_called_once_with("stop")
+        status_bar.showMessage.assert_called_once_with(
+            "所有课程已处理完毕，待抢列表已清空"
+        )
+
+    def test_worker_emits_authoritative_completion_signal(self):
+        course = {"JXBID": "target-class", "KCM": "测试课程"}
+        with patch("xk_spider.gui.workers.OCR_AVAILABLE", False):
+            worker = MultiGrabWorker(
+                [course], "student", "batch-current", "token",
+                "JSESSIONID=current", max_workers=1,
+            )
+        worker._monitor_course_loop = lambda selected: worker._remove_course_safe(
+            selected["JXBID"]
+        )
+        worker._health_check_loop = lambda: None
+        events = []
+        worker.all_courses_processed.connect(lambda: events.append("done"))
+
+        worker.run()
+
+        self.assertEqual(events, ["done"])
         self.assertEqual(worker._get_courses_snapshot(), [])
 
 
