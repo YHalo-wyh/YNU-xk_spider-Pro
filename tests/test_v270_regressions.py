@@ -3,7 +3,8 @@ import tempfile
 import unittest
 import io
 import threading
-from unittest.mock import Mock
+import time
+from unittest.mock import Mock, patch
 
 import numpy as np
 import requests
@@ -293,6 +294,32 @@ class CourseMonitorDiagnosticsTests(unittest.TestCase):
         self.assertEqual(session.cookies.get_dict(), {
             "JSESSIONID": "new", "route": "active"
         })
+
+    def test_query_confirmed_selection_emits_success_before_cleanup(self):
+        course = self._course()
+        course["SKJS"] = "测试教师"
+        with patch("xk_spider.gui.workers.OCR_AVAILABLE", False):
+            worker = MultiGrabWorker(
+                [course], "student", "batch-current", "token",
+                "JSESSIONID=current", max_workers=1,
+            )
+        worker._last_login_check_time = time.time()
+        worker._api_query_course_capacity = Mock(return_value=(
+            1,
+            50,
+            {"isFull": False, "isChoose": True},
+        ))
+        success_events = []
+        worker.success.connect(
+            lambda message, selected: success_events.append((message, selected))
+        )
+
+        worker._monitor_course_loop(course)
+
+        self.assertEqual(len(success_events), 1)
+        self.assertIn("已确认选中", success_events[0][0])
+        self.assertEqual(success_events[0][1]["JXBID"], "target-class")
+        self.assertEqual(worker._get_courses_snapshot(), [])
 
 
 if __name__ == "__main__":

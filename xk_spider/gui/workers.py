@@ -1550,6 +1550,32 @@ class MultiGrabWorker(QThread):
         self._remove_course_safe(tc_id)
         self._retire_conflicting_pending_courses(course)
 
+    def _report_confirmed_selection(self, course):
+        """Report success when a later authoritative query shows isChoose=True.
+
+        The submit endpoint can return a capacity error while the subsequent
+        course query already shows that this account selected the class.  That
+        authoritative state must follow the same UI/notification success path
+        as an immediate code=1 response instead of silently removing the item.
+        """
+        course = course or {}
+        course_name = course.get('KCM', '') or '未知课程'
+        teacher = course.get('SKJS', '')
+        teacher_suffix = f" - {teacher}" if teacher else ''
+        message = f"已确认选中: {course_name}{teacher_suffix}"
+        self.success.emit(message, course)
+        self._send_notifications(
+            f"选课成功: {course_name}",
+            f"**课程**: {course_name}\n\n**教师**: {teacher or '未知'}"
+            "\n\n**状态**: 已由课程查询接口确认选中",
+            event='select_confirmed',
+            context=self._course_context(
+                course,
+                message=f"已确认选中: {course_name}",
+            ),
+        )
+        self._handle_success_cleanup(course)
+
     def _increment_request_count(self):
         """线程安全地增加请求计数并发送心跳"""
         with self._request_count_lock:
@@ -3112,7 +3138,7 @@ class MultiGrabWorker(QThread):
                 if state.get('last_status') != 'chosen':
                     self.status.emit(f"[INFO] {course_name} 已选中")
                     state['last_status'] = 'chosen'
-                self._handle_success_cleanup(course)
+                self._report_confirmed_selection(course)
                 break
             
             # ========== 安全策略 2: 最高优先级检查 isFull ==========
